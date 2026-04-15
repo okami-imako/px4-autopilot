@@ -196,14 +196,13 @@ async def run():
                     drone_north, drone_east, drone_down, drone_yaw_deg
                 )
 
-                # Track laterally, but climb gradually (don't jump to sphere altitude)
+                # Track laterally, climb gradually, never go above sphere
                 target_north = sn
                 target_east = se
                 dist_vertical = (SPHERE_RADIUS * FOCAL_LEN) / radius_px
-                if dist_vertical > HIT_DISTANCE:
-                    target_down = target_down - CLIMB_RATE / 30.0
-                else:
-                    target_down = sd
+                target_down = target_down - CLIMB_RATE / 30.0
+                # Clamp: don't go higher than sphere (sd is more negative = higher in NED)
+                target_down = max(target_down, sd)
 
                 await drone.offboard.set_position_ned(
                     PositionNedYaw(target_north, target_east, target_down, 0.0)
