@@ -15,6 +15,7 @@ IMAGE_H = 768
 HFOV = math.radians(107)
 FOCAL_LEN = (IMAGE_W / 2) / math.tan(HFOV / 2)  # ~485.9 px
 HIT_DISTANCE = 1.0  # meters — close enough to count as a hit
+CLIMB_RATE = 0.5    # m/s — gradual ascent toward sphere
 
 
 # =========================
@@ -184,9 +185,15 @@ async def run():
                     drone_north, drone_east, drone_down, drone_yaw_deg
                 )
 
+                # Track laterally, but climb gradually (don't jump to sphere altitude)
                 target_north = sn
                 target_east = se
-                target_down = sd
+                dist_vertical = (SPHERE_RADIUS * FOCAL_LEN) / radius_px
+                if dist_vertical > HIT_DISTANCE:
+                    # Climb gradually: step down in NED (= up) by CLIMB_RATE / frame_rate
+                    target_down = drone_down - CLIMB_RATE / 30.0
+                else:
+                    target_down = sd
 
                 await drone.offboard.set_position_ned(
                     PositionNedYaw(target_north, target_east, target_down, 0.0)
