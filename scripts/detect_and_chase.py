@@ -14,6 +14,7 @@ IMAGE_W = 1024
 IMAGE_H = 768
 HFOV = math.radians(107)
 FOCAL_LEN = (IMAGE_W / 2) / math.tan(HFOV / 2)  # ~485.9 px
+HIT_DISTANCE = 1.0  # meters — close enough to count as a hit
 
 
 # =========================
@@ -199,6 +200,13 @@ async def run():
                 dist_est = (SPHERE_RADIUS * FOCAL_LEN) / radius_px
                 cv2.putText(frame, f"dist: {dist_est:.1f}m  pos: ({sn:.1f},{se:.1f},{sd:.1f})",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+                if dist_est < HIT_DISTANCE:
+                    cv2.putText(frame, "HIT!", (IMAGE_W // 2 - 50, IMAGE_H // 2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 4)
+                    cv2.imshow("Tracking", frame)
+                    cv2.waitKey(3000)
+                    break
             else:
                 # Lost target: hold lateral position, stay at current altitude (don't climb)
                 hold_down = max(drone_down, target_down)  # max = lower altitude in NED
