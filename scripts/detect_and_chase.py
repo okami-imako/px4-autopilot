@@ -1,15 +1,32 @@
 import asyncio
+import math
 import numpy as np
 import cv2
 from mavsdk import System
-from mavsdk.offboard import VelocityNedYaw
+from mavsdk.offboard import PositionNedYaw
 
 
 # =========================
-# STATE (very important)
+# CONSTANTS
 # =========================
-filtered_x = 0.0
-filtered_y = 0.0
+SPHERE_RADIUS = 0.5  # meters (1m diameter)
+IMAGE_W = 1024
+IMAGE_H = 768
+HFOV = math.radians(107)
+FOCAL_LEN = (IMAGE_W / 2) / math.tan(HFOV / 2)  # ~485.9 px
+
+
+# =========================
+# STATE
+# =========================
+drone_north = 0.0
+drone_east = 0.0
+drone_down = 0.0
+drone_yaw_deg = 0.0
+
+target_north = 0.0
+target_east = 0.0
+target_down = 0.0
 
 
 # =========================
@@ -24,7 +41,6 @@ def detect_red_object(frame):
     upper2 = np.array([180, 255, 255])
 
     mask = cv2.inRange(hsv, lower1, upper1) | cv2.inRange(hsv, lower2, upper2)
-
     mask = cv2.GaussianBlur(mask, (7, 7), 0)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -34,60 +50,77 @@ def detect_red_object(frame):
 
     c = max(contours, key=cv2.contourArea)
 
-    if cv2.contourArea(c) < 50:  # ignore noise (important for 1–2% object)
+    if cv2.contourArea(c) < 50:
         return None
 
-    x, y, w, h = cv2.boundingRect(c)
-    cx = x + w // 2
-    cy = y + h // 2
+    (cx, cy), radius = cv2.minEnclosingCircle(c)
+    cx, cy, radius = int(cx), int(cy), float(radius)
 
-    return cx, cy, x, y, w, h
+    if radius < 3:
+        return None
+
+    return cx, cy, radius
 
 
 # =========================
-# CONTROL (stable baseline)
+# POSITION ESTIMATION
 # =========================
-def compute_velocity(cx, cy, width, height):
-    global filtered_x, filtered_y
+def compute_sphere_position(cx, cy, radius_px, d_north, d_east, d_down, yaw_deg):
+    """Estimate sphere world position in NED from pixel detection + drone telemetry."""
+    yaw_rad = math.radians(yaw_deg)
 
-    # normalize error (-1..1)
-    ex = (cx - width / 2) / (width / 2)
-    ey = (cy - height / 2) / (height / 2)
+    # Distance along optical axis (vertical for upward camera)
+    dist_vertical = (SPHERE_RADIUS * FOCAL_LEN) / radius_px
 
-    # VERY IMPORTANT: heavy smoothing
-    ALPHA = 0.08
-    filtered_x = (1 - ALPHA) * filtered_x + ALPHA * ex
-    filtered_y = (1 - ALPHA) * filtered_y + ALPHA * ey
+    # Pixel offset from image center
+    dx_px = cx - IMAGE_W / 2
+    dy_px = cy - IMAGE_H / 2
 
-    DEADZONE = 0.01
+    # Lateral offsets in body frame (camera pointing up, pitch=-90°)
+    # Image +x -> body +Y (East at yaw=0)
+    # Image +y -> body +X (North at yaw=0)
+    offset_east_body = dist_vertical * dx_px / FOCAL_LEN
+    offset_north_body = dist_vertical * dy_px / FOCAL_LEN
 
-    def apply_deadzone(x):
-        if abs(x) < DEADZONE:
-            return 0.0
-        # smooth transition instead of hard cutoff
-        return np.sign(x) * (abs(x) - DEADZONE) / (1 - DEADZONE)
+    # Rotate by drone yaw to NED
+    offset_north = offset_north_body * math.cos(yaw_rad) - offset_east_body * math.sin(yaw_rad)
+    offset_east = offset_north_body * math.sin(yaw_rad) + offset_east_body * math.cos(yaw_rad)
+
+    # Sphere position in NED (sphere is above drone)
+    sphere_north = d_north + offset_north
+    sphere_east = d_east + offset_east
+    sphere_down = d_down - dist_vertical
+
+    return sphere_north, sphere_east, sphere_down
 
 
-    filtered_x = apply_deadzone(filtered_x)
-    filtered_y = apply_deadzone(filtered_y)
+# =========================
+# TELEMETRY
+# =========================
+async def subscribe_telemetry(drone):
+    global drone_north, drone_east, drone_down, drone_yaw_deg
 
-    # proportional only (NO derivative, NO prediction)
-    Kp = 1.0
+    async def update_position():
+        global drone_north, drone_east, drone_down
+        async for pvn in drone.telemetry.position_velocity_ned():
+            drone_north = pvn.position.north_m
+            drone_east = pvn.position.east_m
+            drone_down = pvn.position.down_m
 
-    vx = Kp * filtered_y
-    vy = Kp * filtered_x
+    async def update_attitude():
+        global drone_yaw_deg
+        async for att in drone.telemetry.attitude_euler():
+            drone_yaw_deg = att.yaw_deg
 
-    # clamp aggressively (critical for stability)
-    vx = np.clip(vx, -1.2, 1.2)
-    vy = np.clip(vy, -1.2, 1.2)
-
-    return vx, vy, 0.0, filtered_x, filtered_y
+    await asyncio.gather(update_position(), update_attitude())
 
 
 # =========================
 # MAIN
 # =========================
 async def run():
+    global target_north, target_east, target_down
+
     drone = System()
     await drone.connect(system_address="udpin://0.0.0.0:14540")
 
@@ -97,11 +130,14 @@ async def run():
             print("Connected")
             break
 
-    # wait armable
     async for health in drone.telemetry.health():
         if health.is_armable:
             print("Armable")
             break
+
+    # Start telemetry before arming
+    telemetry_task = asyncio.create_task(subscribe_telemetry(drone))
+    await asyncio.sleep(1)
 
     print("Arming...")
     await drone.action.arm()
@@ -110,11 +146,15 @@ async def run():
     await drone.action.takeoff()
     await asyncio.sleep(5)
 
-    # OFFBOARD priming
+    # Initialize targets to current drone position
+    target_north = drone_north
+    target_east = drone_east
+    target_down = drone_down
+
+    # Prime offboard with current position
+    initial_pos = PositionNedYaw(drone_north, drone_east, drone_down, 0.0)
     for _ in range(10):
-        await drone.offboard.set_velocity_ned(
-            VelocityNedYaw(0.0, 0.0, 0.0, 0.0)
-        )
+        await drone.offboard.set_position_ned(initial_pos)
         await asyncio.sleep(0.05)
 
     await drone.offboard.start()
@@ -133,34 +173,36 @@ async def run():
             if not ret:
                 continue
 
-            h, w, _ = frame.shape
-
             result = detect_red_object(frame)
 
             if result:
-                cx, cy, x, y, bw, bh = result
+                cx, cy, radius_px = result
 
-                vx, vy, vz, ex, ey = compute_velocity(cx, cy, w, h)
+                sn, se, sd = compute_sphere_position(
+                    cx, cy, radius_px,
+                    drone_north, drone_east, drone_down, drone_yaw_deg
+                )
 
-                await drone.offboard.set_velocity_ned(
-                    VelocityNedYaw(vx, vy, vz, 0.0)
+                target_north = sn
+                target_east = se
+                target_down = sd
+
+                await drone.offboard.set_position_ned(
+                    PositionNedYaw(target_north, target_east, target_down, 0.0)
                 )
 
                 # visualization
-                cv2.rectangle(frame, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
+                cv2.circle(frame, (cx, cy), int(radius_px), (0, 255, 0), 2)
                 cv2.circle(frame, (cx, cy), 4, (255, 0, 0), -1)
-                cv2.circle(frame, (w // 2, h // 2), 4, (0, 0, 255), -1)
+                cv2.circle(frame, (IMAGE_W // 2, IMAGE_H // 2), 4, (0, 0, 255), -1)
 
-                cv2.putText(frame, f"err: {ex:.2f},{ey:.2f}",
-                            (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7,
-                            (255, 255, 255), 2)
-
+                dist_est = (SPHERE_RADIUS * FOCAL_LEN) / radius_px
+                cv2.putText(frame, f"dist: {dist_est:.1f}m  pos: ({sn:.1f},{se:.1f},{sd:.1f})",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             else:
-                # hover
-                await drone.offboard.set_velocity_ned(
-                    VelocityNedYaw(0.0, 0.0, 0.0, 0.0)
+                # Hold last known position
+                await drone.offboard.set_position_ned(
+                    PositionNedYaw(target_north, target_east, target_down, 0.0)
                 )
 
             cv2.imshow("Tracking", frame)
@@ -169,6 +211,7 @@ async def run():
                 break
 
     finally:
+        telemetry_task.cancel()
         print("Stopping...")
         await drone.offboard.stop()
         await drone.action.disarm()
