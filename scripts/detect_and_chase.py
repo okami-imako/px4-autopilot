@@ -3,7 +3,7 @@ import math
 import numpy as np
 import cv2
 from mavsdk import System
-from mavsdk.offboard import PositionNedYaw
+from mavsdk.offboard import PositionNedYaw, VelocityNedYaw
 
 
 # =========================
@@ -17,7 +17,7 @@ FOCAL_LEN = (IMAGE_W / 2) / math.tan(HFOV / 2)  # ~485.9 px
 CAMERA_TILT = math.radians(90)  # straight up
 HIT_DISTANCE = 1.0  # meters — close enough to count as a hit
 LUNGE_DISTANCE = 5.0  # meters — start lunging when this close
-LUNGE_OVERSHOOT = 3.0  # multiplier — overshoot target to go fast
+LUNGE_SPEED = 5.0     # m/s — velocity toward sphere during lunge
 SEARCH_DESCEND = 0.3     # m/s — descend while searching
 SEARCH_RADIUS = 3.0      # meters — spiral search radius
 SEARCH_SPEED = 1.0       # rad/s — angular speed of search spiral
@@ -213,19 +213,29 @@ async def run():
 
                 dist_est = (SPHERE_RADIUS * FOCAL_LEN) / radius_px
 
-                if dist_est < LUNGE_DISTANCE:
-                    # Lunge: overshoot past sphere so PX4 flies through at max speed
-                    target_north = drone_north + (sn - drone_north) * LUNGE_OVERSHOOT
-                    target_east = drone_east + (se - drone_east) * LUNGE_OVERSHOOT
-                    target_down = drone_down + (sd - drone_down) * LUNGE_OVERSHOOT
-                else:
-                    target_north = sn
-                    target_east = se
-                    target_down = sd
+                target_north = sn
+                target_east = se
+                target_down = sd
 
-                await drone.offboard.set_position_ned(
-                    PositionNedYaw(target_north, target_east, target_down, 0.0)
-                )
+                if dist_est < LUNGE_DISTANCE:
+                    # Lunge: fly directly at sphere at fixed speed
+                    dn = sn - drone_north
+                    de = se - drone_east
+                    dd = sd - drone_down
+                    dist = math.sqrt(dn**2 + de**2 + dd**2)
+                    if dist > 0.1:
+                        scale = LUNGE_SPEED / dist
+                        await drone.offboard.set_velocity_ned(
+                            VelocityNedYaw(dn * scale, de * scale, dd * scale, 0.0)
+                        )
+                    else:
+                        await drone.offboard.set_position_ned(
+                            PositionNedYaw(target_north, target_east, target_down, 0.0)
+                        )
+                else:
+                    await drone.offboard.set_position_ned(
+                        PositionNedYaw(target_north, target_east, target_down, 0.0)
+                    )
 
                 # visualization
                 cv2.circle(frame, (cx, cy), int(radius_px), (0, 255, 0), 2)
