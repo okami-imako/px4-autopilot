@@ -16,6 +16,8 @@ HFOV = math.radians(107)
 FOCAL_LEN = (IMAGE_W / 2) / math.tan(HFOV / 2)  # ~485.9 px
 CAMERA_TILT = math.radians(60)  # tilt up from horizontal
 HIT_DISTANCE = 1.0  # meters — close enough to count as a hit
+LUNGE_DISTANCE = 5.0  # meters — start lunging when this close
+LUNGE_OVERSHOOT = 3.0  # multiplier — overshoot target to go fast
 SEARCH_DESCEND = 0.3     # m/s — descend while searching
 SEARCH_RADIUS = 3.0      # meters — spiral search radius
 SEARCH_SPEED = 1.0       # rad/s — angular speed of search spiral
@@ -209,9 +211,17 @@ async def run():
                     drone_north, drone_east, drone_down, drone_yaw_deg
                 )
 
-                target_north = sn
-                target_east = se
-                target_down = sd
+                dist_est = (SPHERE_RADIUS * FOCAL_LEN) / radius_px
+
+                if dist_est < LUNGE_DISTANCE:
+                    # Lunge: overshoot past sphere so PX4 flies through at max speed
+                    target_north = drone_north + (sn - drone_north) * LUNGE_OVERSHOOT
+                    target_east = drone_east + (se - drone_east) * LUNGE_OVERSHOOT
+                    target_down = drone_down + (sd - drone_down) * LUNGE_OVERSHOOT
+                else:
+                    target_north = sn
+                    target_east = se
+                    target_down = sd
 
                 await drone.offboard.set_position_ned(
                     PositionNedYaw(target_north, target_east, target_down, 0.0)
@@ -222,7 +232,6 @@ async def run():
                 cv2.circle(frame, (cx, cy), 4, (255, 0, 0), -1)
                 cv2.circle(frame, (IMAGE_W // 2, IMAGE_H // 2), 4, (0, 0, 255), -1)
 
-                dist_est = (SPHERE_RADIUS * FOCAL_LEN) / radius_px
                 cv2.putText(frame, f"dist: {dist_est:.1f}m  pos: ({sn:.1f},{se:.1f},{sd:.1f})",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
@@ -249,7 +258,8 @@ async def run():
                     search_time += 1.0 / 30.0
                     spiral_n = search_center_north + SEARCH_RADIUS * math.cos(SEARCH_SPEED * search_time)
                     spiral_e = search_center_east + SEARCH_RADIUS * math.sin(SEARCH_SPEED * search_time)
-                    search_down = drone_down + SEARCH_DESCEND / 30.0
+                    search_down = target_down + SEARCH_DESCEND / 30.0
+                    target_down = search_down
 
                     await drone.offboard.set_position_ned(
                         PositionNedYaw(spiral_n, spiral_e, search_down, 0.0)
