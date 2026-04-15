@@ -200,9 +200,10 @@ async def run():
                 cv2.putText(frame, f"dist: {dist_est:.1f}m  pos: ({sn:.1f},{se:.1f},{sd:.1f})",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             else:
-                # Hold last known position
+                # Lost target: hold lateral position, stay at current altitude (don't climb)
+                hold_down = max(drone_down, target_down)  # max = lower altitude in NED
                 await drone.offboard.set_position_ned(
-                    PositionNedYaw(target_north, target_east, target_down, 0.0)
+                    PositionNedYaw(target_north, target_east, hold_down, 0.0)
                 )
 
             cv2.imshow("Tracking", frame)
