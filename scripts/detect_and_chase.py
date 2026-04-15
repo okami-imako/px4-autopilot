@@ -16,6 +16,9 @@ HFOV = math.radians(107)
 FOCAL_LEN = (IMAGE_W / 2) / math.tan(HFOV / 2)  # ~485.9 px
 HIT_DISTANCE = 1.0  # meters — close enough to count as a hit
 CLIMB_RATE = 0.5    # m/s — gradual ascent toward sphere
+SEARCH_YAW_RATE = 30.0   # deg/s — spin rate when searching
+SEARCH_DESCEND = 0.3     # m/s — descend while searching (widens camera coverage)
+LOST_FRAMES_TO_SEARCH = 15  # frames without detection before entering search mode
 
 
 # =========================
@@ -29,6 +32,8 @@ drone_yaw_deg = 0.0
 target_north = 0.0
 target_east = 0.0
 target_down = 0.0
+lost_frames = 0
+search_yaw = 0.0
 
 
 # =========================
@@ -121,7 +126,7 @@ async def subscribe_telemetry(drone):
 # MAIN
 # =========================
 async def run():
-    global target_north, target_east, target_down
+    global target_north, target_east, target_down, lost_frames, search_yaw
 
     drone = System()
     await drone.connect(system_address="udpin://0.0.0.0:14540")
@@ -179,6 +184,7 @@ async def run():
 
             if result:
                 cx, cy, radius_px = result
+                lost_frames = 0
 
                 sn, se, sd = compute_sphere_position(
                     cx, cy, radius_px,
@@ -190,7 +196,6 @@ async def run():
                 target_east = se
                 dist_vertical = (SPHERE_RADIUS * FOCAL_LEN) / radius_px
                 if dist_vertical > HIT_DISTANCE:
-                    # Climb gradually: step down in NED (= up) by CLIMB_RATE / frame_rate
                     target_down = drone_down - CLIMB_RATE / 30.0
                 else:
                     target_down = sd
@@ -215,11 +220,23 @@ async def run():
                     cv2.waitKey(3000)
                     break
             else:
-                # Lost target: hold lateral position, stay at current altitude (don't climb)
-                hold_down = max(drone_down, target_down)  # max = lower altitude in NED
-                await drone.offboard.set_position_ned(
-                    PositionNedYaw(target_north, target_east, hold_down, 0.0)
-                )
+                lost_frames += 1
+
+                if lost_frames < LOST_FRAMES_TO_SEARCH:
+                    # Brief loss: hold position, don't climb
+                    hold_down = max(drone_down, target_down)
+                    await drone.offboard.set_position_ned(
+                        PositionNedYaw(target_north, target_east, hold_down, 0.0)
+                    )
+                else:
+                    # Search mode: descend slowly + spin to scan sky
+                    search_yaw += SEARCH_YAW_RATE / 30.0
+                    search_down = drone_down + SEARCH_DESCEND / 30.0
+                    await drone.offboard.set_position_ned(
+                        PositionNedYaw(target_north, target_east, search_down, search_yaw)
+                    )
+                    cv2.putText(frame, "SEARCHING...", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
 
             cv2.imshow("Tracking", frame)
 
