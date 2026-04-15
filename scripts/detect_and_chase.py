@@ -14,9 +14,9 @@ IMAGE_W = 1024
 IMAGE_H = 768
 HFOV = math.radians(107)
 FOCAL_LEN = (IMAGE_W / 2) / math.tan(HFOV / 2)  # ~485.9 px
+CAMERA_TILT = math.radians(60)  # tilt up from horizontal
 HIT_DISTANCE = 1.0  # meters — close enough to count as a hit
-CLIMB_RATE = 0.5    # m/s — gradual ascent toward sphere
-SEARCH_DESCEND = 0.3     # m/s — descend while searching (widens camera coverage)
+SEARCH_DESCEND = 0.3     # m/s — descend while searching
 SEARCH_RADIUS = 3.0      # meters — spiral search radius
 SEARCH_SPEED = 1.0       # rad/s — angular speed of search spiral
 LOST_FRAMES_TO_SEARCH = 15  # frames without detection before entering search mode
@@ -76,30 +76,43 @@ def detect_red_object(frame):
 # POSITION ESTIMATION
 # =========================
 def compute_sphere_position(cx, cy, radius_px, d_north, d_east, d_down, yaw_deg):
-    """Estimate sphere world position in NED from pixel detection + drone telemetry."""
+    """Estimate sphere world position in NED using ray casting from tilted camera."""
     yaw_rad = math.radians(yaw_deg)
+    cos_t = math.cos(CAMERA_TILT)
+    sin_t = math.sin(CAMERA_TILT)
 
-    # Distance along optical axis (vertical for upward camera)
-    dist_vertical = (SPHERE_RADIUS * FOCAL_LEN) / radius_px
+    # Ray in camera frame (Gazebo: +X optical axis, +Y image right, +Z image up)
+    ray_cam_x = FOCAL_LEN
+    ray_cam_y = cx - IMAGE_W / 2
+    ray_cam_z = -(cy - IMAGE_H / 2)
 
-    # Pixel offset from image center
-    dx_px = cx - IMAGE_W / 2
-    dy_px = cy - IMAGE_H / 2
+    # Rotate camera->body by pitch=-CAMERA_TILT (rotation about Y)
+    # Body frame: +X forward, +Y right, +Z up
+    ray_body_x = cos_t * ray_cam_x - sin_t * ray_cam_z
+    ray_body_y = ray_cam_y
+    ray_body_z = sin_t * ray_cam_x + cos_t * ray_cam_z
 
-    # Lateral offsets in body frame (camera pointing up, pitch=-90°)
-    # Image +x -> body +Y (East at yaw=0)
-    # Image +y -> body +X (North at yaw=0)
-    offset_east_body = dist_vertical * dx_px / FOCAL_LEN
-    offset_north_body = dist_vertical * dy_px / FOCAL_LEN
+    # Normalize
+    ray_len = math.sqrt(ray_body_x**2 + ray_body_y**2 + ray_body_z**2)
+    ray_body_x /= ray_len
+    ray_body_y /= ray_len
+    ray_body_z /= ray_len
 
-    # Rotate by drone yaw to NED
-    offset_north = offset_north_body * math.cos(yaw_rad) - offset_east_body * math.sin(yaw_rad)
-    offset_east = offset_north_body * math.sin(yaw_rad) + offset_east_body * math.cos(yaw_rad)
+    # Distance from camera to sphere center (pinhole model)
+    distance = (SPHERE_RADIUS * FOCAL_LEN) / radius_px
 
-    # Sphere position in NED (sphere is above drone)
+    # Sphere offset in body frame
+    off_x = distance * ray_body_x  # forward
+    off_y = distance * ray_body_y  # right
+    off_z = distance * ray_body_z  # up
+
+    # Body to NED (rotate by yaw, flip Z)
+    offset_north = off_x * math.cos(yaw_rad) - off_y * math.sin(yaw_rad)
+    offset_east = off_x * math.sin(yaw_rad) + off_y * math.cos(yaw_rad)
+
     sphere_north = d_north + offset_north
     sphere_east = d_east + offset_east
-    sphere_down = d_down - dist_vertical
+    sphere_down = d_down - off_z  # body +Z up = NED -down
 
     return sphere_north, sphere_east, sphere_down
 
@@ -196,13 +209,9 @@ async def run():
                     drone_north, drone_east, drone_down, drone_yaw_deg
                 )
 
-                # Track laterally, climb gradually, never go above sphere
                 target_north = sn
                 target_east = se
-                dist_vertical = (SPHERE_RADIUS * FOCAL_LEN) / radius_px
-                target_down = target_down - CLIMB_RATE / 30.0
-                # Clamp: don't go higher than sphere (sd is more negative = higher in NED)
-                target_down = max(target_down, sd)
+                target_down = sd
 
                 await drone.offboard.set_position_ned(
                     PositionNedYaw(target_north, target_east, target_down, 0.0)
@@ -227,10 +236,9 @@ async def run():
                 lost_frames += 1
 
                 if lost_frames < LOST_FRAMES_TO_SEARCH:
-                    # Brief loss: hold position, don't climb
-                    hold_down = max(drone_down, target_down)
+                    # Brief loss: hold position
                     await drone.offboard.set_position_ned(
-                        PositionNedYaw(target_north, target_east, hold_down, 0.0)
+                        PositionNedYaw(target_north, target_east, target_down, 0.0)
                     )
                 else:
                     # Search mode: spiral around last known position + descend
