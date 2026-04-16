@@ -1718,7 +1718,9 @@ void EKF2::PublishLocalPosition(const hrt_abstime &timestamp)
 	lpos.az = vel_deriv(2);
 
 	lpos.xy_valid = _ekf.isLocalHorizontalPositionValid();
-	lpos.v_xy_valid = _ekf.isLocalHorizontalPositionValid();
+	// Forced: allow velocity control without horizontal position aiding (no GPS)
+	// Accelerometer provides velocity; camera visual servoing corrects drift
+	lpos.v_xy_valid = true;
 
 	// TODO: some modules (e.g.: mc_pos_control) don't handle v_z_valid != z_valid properly
 	lpos.z_valid = _ekf.isLocalVerticalPositionValid() || _ekf.isLocalVerticalVelocityValid();
