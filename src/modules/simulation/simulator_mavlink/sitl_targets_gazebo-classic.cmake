@@ -86,6 +86,7 @@ if(gazebo_FOUND)
 		glider
 		iris
 		iris_dual_gps
+		iris_fpv_cam
 		iris_foggy_lidar
 		iris_irlock
 		iris_depth_camera
