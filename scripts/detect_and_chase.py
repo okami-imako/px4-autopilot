@@ -101,15 +101,12 @@ async def run():
             print("Connected")
             break
 
-    print("Waiting for armable...")
-    async for health in drone.telemetry.health():
-        if health.is_armable:
-            print("Armable")
-            break
-
     # Start telemetry
     telemetry_task = asyncio.create_task(subscribe_telemetry(drone))
-    await asyncio.sleep(1)
+
+    # Wait for EKF to initialize (heading from magnetometer)
+    print("Waiting for EKF init...")
+    await asyncio.sleep(10)
 
     # Prime offboard with zero velocity
     for _ in range(10):
@@ -118,8 +115,16 @@ async def run():
 
     await drone.offboard.start()
 
+    # Arm with retries
     print("Arming...")
-    await drone.action.arm()
+    for attempt in range(10):
+        try:
+            await drone.action.arm()
+            print("Armed")
+            break
+        except Exception as e:
+            print(f"Arm attempt {attempt + 1} failed: {e}")
+            await asyncio.sleep(2)
 
     # Takeoff: climb at fixed speed
     print("Taking off...")
