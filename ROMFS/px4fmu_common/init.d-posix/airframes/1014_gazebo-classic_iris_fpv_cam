@@ -6,3 +6,6 @@
 #
 
 . ${R}etc/init.d-posix/airframes/10015_gazebo-classic_iris
+
+# Disable GPS
+param set-default EKF2_GPS_CTRL 0
