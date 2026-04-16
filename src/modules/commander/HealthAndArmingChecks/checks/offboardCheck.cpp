@@ -68,20 +68,17 @@ void OffboardChecks::checkAndReport(const Context &context, Report &reporter)
 				reporter.clearCanRunBits(affected_modes);
 			}
 
-		} else if (offboard_control_mode.velocity && reporter.failsafeFlags().local_velocity_invalid) {
-			offboard_available = false;
-			has_specific_reason = true;
-
-			if (has_affected_modes) {
-				/* EVENT
-				 * @description
-				 * Offboard velocity control requires a valid local velocity estimate.
-				 */
-				reporter.armingCheckFailure(affected_modes, health_component_t::system,
-							    events::ID("check_modes_offboard_no_local_velocity"),
-							    events::Log::Error, "Offboard requires local velocity");
-				reporter.clearCanRunBits(affected_modes);
-			}
+		// Disabled: allow offboard velocity control without velocity aiding (no GPS)
+		// } else if (offboard_control_mode.velocity && reporter.failsafeFlags().local_velocity_invalid) {
+		// 	offboard_available = false;
+		// 	has_specific_reason = true;
+		//
+		// 	if (has_affected_modes) {
+		// 		reporter.armingCheckFailure(affected_modes, health_component_t::system,
+		// 					    events::ID("check_modes_offboard_no_local_velocity"),
+		// 					    events::Log::Error, "Offboard requires local velocity");
+		// 		reporter.clearCanRunBits(affected_modes);
+		// 	}
 
 		} else if ((offboard_control_mode.acceleration || offboard_control_mode.attitude)
 			   && reporter.failsafeFlags().attitude_invalid) {
