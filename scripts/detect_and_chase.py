@@ -109,10 +109,12 @@ async def run():
     await asyncio.sleep(10)
 
     # Prime offboard with zero velocity
-    for _ in range(10):
+    print("Priming offboard...")
+    for _ in range(20):
         await drone.offboard.set_velocity_ned(VelocityNedYaw(0, 0, 0, 0))
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.1)
 
+    print("Starting offboard...")
     await drone.offboard.start()
 
     # Arm with retries
