@@ -286,13 +286,12 @@ def approach_speed(dist):
 
 
 def compute_guidance(tracker, dist_est, prev_cmd):
-    """Compute NED velocity: fixed vertical + feedforward + bearing-proportional lateral.
+    """Compute NED velocity: bearing-dependent vertical + feedforward + proportional lateral.
 
-    Vertical: approach_speed (within PX4 limits).
+    Vertical: approach_speed scaled by bearing D component (auto-adjusts to target altitude).
     Lateral: feedforward (match target velocity) + K_LATERAL × bearing_angle (close gap).
     """
     vd_speed = approach_speed(dist_est)
-    vd = -vd_speed  # NED negative = up
 
     # Feedforward: estimate target lateral velocity from bearing rate + drone velocity
     ff_vn = prev_cmd[0] + dist_est * tracker.dbn
@@ -301,6 +300,10 @@ def compute_guidance(tracker, dist_est, prev_cmd):
     # Proportional correction from predicted bearing offset
     t_int = min(dist_est / max(vd_speed, 1.0), MAX_INTERCEPT_TIME)
     pn, pe, pd = tracker.predict_bearing(t_int)
+
+    # Vertical: scale by bearing D (pd<0 = target above = go up, pd>0 = below = descend)
+    vd = vd_speed * pd
+
     lat_mag = math.sqrt(pn * pn + pe * pe)
     if lat_mag > 0.001:
         angle = math.atan2(lat_mag, -pd)
@@ -485,7 +488,7 @@ async def run():
                     angle = SEARCH_OMEGA * search_time + bias_dir
                     vn = SEARCH_LATERAL_SPEED * math.cos(angle)
                     ve = SEARCH_LATERAL_SPEED * math.sin(angle)
-                    vd = -SEARCH_ASCEND_SPEED
+                    vd = 0.0  # hold altitude — don't overshoot further
 
                     sn, se, sd = smooth_cmd(vn, ve, vd, cmd)
                     await drone.offboard.set_velocity_ned(
