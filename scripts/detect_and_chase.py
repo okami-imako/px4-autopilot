@@ -20,21 +20,21 @@ FOCAL_LEN = (IMAGE_W / 2) / math.tan(HFOV / 2)
 HIT_DISTANCE = 1.0           # meters — close enough to count as a hit
 
 # Velocity command smoothing
-CMD_SMOOTH = 0.3             # EMA alpha (lower = smoother)
+CMD_SMOOTH = 0.4             # EMA alpha (lower = smoother)
 
-# Approach speed profile (4 zones) — total 3D speed toward target
-APPROACH_FAR_DIST = 15.0
-APPROACH_MED_DIST = 5.0
-APPROACH_CLOSE_DIST = 2.0
-APPROACH_FAR_SPEED = 5.0
-APPROACH_MED_MAX = 10.0
-APPROACH_CLOSE_SPEED = 12.0
-APPROACH_TERMINAL_SPEED = 12.0
-DRIFT_BOOST = 1.3
+# Lateral control — bearing-proportional with cap
+K_LATERAL = 5.0              # m/s per radian of bearing offset from vertical
+MAX_LATERAL_VEL = 3.0        # m/s — keeps tilt manageable
+
+# Vertical speed profile (within MPC_Z_VEL_MAX_UP = 3.0 default)
+APPROACH_FAR_DIST = 10.0
+APPROACH_CLOSE_DIST = 3.0
+APPROACH_FAR_SPEED = 2.5     # m/s upward — far zone
+APPROACH_CLOSE_SPEED = 3.0   # m/s upward — close/terminal
 
 # Tracker (EMA velocity estimation)
-EMA_ALPHA = 0.3
-MAX_INTERCEPT_TIME = 2.0
+EMA_ALPHA = 0.2              # smoother NED bearing rate
+MAX_INTERCEPT_TIME = 0.5     # seconds — short to reduce noise amplification
 MIN_DT = 0.005
 MAX_DT = 0.2
 
@@ -276,40 +276,43 @@ async def subscribe_telemetry(drone):
 # GUIDANCE
 # =========================
 def approach_speed(dist):
-    """4-zone speed profile. Returns total 3D speed toward target."""
+    """2-zone vertical speed profile. Within MPC_Z_VEL_MAX_UP (3.0)."""
     if dist > APPROACH_FAR_DIST:
         return APPROACH_FAR_SPEED
-    if dist > APPROACH_MED_DIST:
-        frac = (APPROACH_FAR_DIST - dist) / (APPROACH_FAR_DIST - APPROACH_MED_DIST)
-        return APPROACH_FAR_SPEED + frac * (APPROACH_MED_MAX - APPROACH_FAR_SPEED)
     if dist > APPROACH_CLOSE_DIST:
-        return APPROACH_CLOSE_SPEED
-    return APPROACH_TERMINAL_SPEED
+        frac = (APPROACH_FAR_DIST - dist) / (APPROACH_FAR_DIST - APPROACH_CLOSE_DIST)
+        return APPROACH_FAR_SPEED + frac * (APPROACH_CLOSE_SPEED - APPROACH_FAR_SPEED)
+    return APPROACH_CLOSE_SPEED
 
 
 def compute_guidance(tracker, dist_est):
-    """Compute NED velocity using bearing-based 3D pursuit.
+    """Compute NED velocity: fixed vertical + bearing-proportional lateral.
 
-    Tracker provides NED bearing (tilt-free). Speed × bearing = velocity.
+    Vertical: approach_speed (within PX4 limits).
+    Lateral: K_LATERAL × bearing_angle from vertical, capped at MAX_LATERAL_VEL.
+    Direction: from NED bearing (tilt-compensated via rotation matrix).
     """
-    speed = approach_speed(dist_est)
+    vd_speed = approach_speed(dist_est)
+    vd = -vd_speed  # NED negative = up
 
-    vis_cs = tracker.visual_closing_speed()
-    if tracker.initialized and vis_cs < 0.5 * speed:
-        speed *= DRIFT_BOOST
-
-    t_int = min(dist_est / max(speed, 1.0), MAX_INTERCEPT_TIME)
+    t_int = min(dist_est / max(vd_speed, 1.0), MAX_INTERCEPT_TIME)
     pn, pe, pd = tracker.predict_bearing(t_int)
 
-    vn = speed * pn
-    ve = speed * pe
-    vd = speed * pd
+    # Lateral: proportional to bearing angle from vertical
+    lat_mag = math.sqrt(pn * pn + pe * pe)
+    if lat_mag > 0.001:
+        angle = math.atan2(lat_mag, -pd)
+        lateral_speed = min(K_LATERAL * angle, MAX_LATERAL_VEL)
+        vn = lateral_speed * (pn / lat_mag)
+        ve = lateral_speed * (pe / lat_mag)
+    else:
+        vn = ve = 0.0
 
     info = {
-        'dist': dist_est, 'speed': speed, 't_int': t_int,
+        'dist': dist_est, 'vd_speed': vd_speed, 't_int': t_int,
         'bn': pn, 'be': pe, 'bd': pd,
-        'dbn': tracker.dbn, 'dbe': tracker.dbe,
-        'vis_cs': vis_cs,
+        'lat_angle': math.degrees(math.atan2(lat_mag, -pd)) if lat_mag > 0.001 else 0.0,
+        'lat_speed': min(K_LATERAL * math.atan2(lat_mag, -pd), MAX_LATERAL_VEL) if lat_mag > 0.001 else 0.0,
     }
 
     return vn, ve, vd, info
@@ -412,11 +415,11 @@ async def run():
                          (0, 255, 255), 1)
 
                 cv2.putText(frame,
-                    f"d:{dist_est:.1f}m spd:{info['speed']:.1f} "
+                    f"d:{dist_est:.1f}m vd:{info['vd_speed']:.1f} "
                     f"v:({sn:.1f},{se:.1f},{sd:.1f})",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 cv2.putText(frame,
-                    f"bear:({info['bn']:.2f},{info['be']:.2f},{info['bd']:.2f}) "
+                    f"lat:{info['lat_angle']:.1f}deg {info['lat_speed']:.1f}m/s "
                     f"Tint:{info['t_int']:.2f}s",
                     (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
