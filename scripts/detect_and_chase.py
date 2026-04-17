@@ -23,8 +23,8 @@ HIT_DISTANCE = 1.0           # meters — close enough to count as a hit
 CMD_SMOOTH = 0.8             # EMA alpha (lower = smoother)
 
 # Lateral control — feedforward + bearing-proportional with cap
-K_LATERAL = 15.0              # m/s per radian of bearing offset from vertical
-MAX_LATERAL_VEL = 25.0        # m/s — room for feedforward + correction
+K_LATERAL = 20.0              # m/s per radian of bearing offset from vertical
+MAX_LATERAL_VEL = 35.0        # m/s — room for feedforward + correction
 
 # Vertical approach — own budget, capped by MPC_Z_VEL_MAX_UP
 VERT_APPROACH_SPEED = 3.0    # m/s — PX4 max, scaled by bearing D
@@ -32,8 +32,8 @@ VERT_APPROACH_SPEED = 3.0    # m/s — PX4 max, scaled by bearing D
 # Lateral approach — own budget, separate from vertical
 APPROACH_FAR_DIST = 10.0
 APPROACH_CLOSE_DIST = 3.0
-APPROACH_FAR_SPEED = 10.0    # m/s — lateral closing speed far
-APPROACH_CLOSE_SPEED = 8.0   # m/s — lateral closing speed near
+APPROACH_FAR_SPEED = 35.0    # m/s — lateral closing speed far
+APPROACH_CLOSE_SPEED = 35.0   # m/s — lateral closing speed near
 
 # Tracker (EMA velocity estimation)
 EMA_ALPHA = 0.2              # smoother NED bearing rate

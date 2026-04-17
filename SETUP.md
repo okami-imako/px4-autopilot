@@ -53,6 +53,11 @@ cd /src/PX4-Autopilot
 make px4_sitl gazebo-classic_iris_fpv_cam
 ```
 
+## Step 4 - Overcoming arming with disabled GPS
+We disabled gps and connected safeguards on PX4 level
+Trying to fly the drone will still fail
+Running QGroundControl along with the sim helps for some reason
+
 This should open gazebo with loaded drone model
 
 Video feed is available at udp port 5600
