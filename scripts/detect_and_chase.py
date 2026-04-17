@@ -20,8 +20,8 @@ FOCAL_LEN = (IMAGE_W / 2) / math.tan(HFOV / 2)
 HIT_DISTANCE = 1.0           # meters — close enough to count as a hit
 
 # Lateral control (PD via lead pursuit)
-KP_CENTER = 2.5              # m/s per normalized pixel error
-MAX_LATERAL_VEL = 4.0        # m/s max lateral command
+KP_CENTER = 0.5              # m/s per normalized pixel error
+MAX_LATERAL_VEL = 5.0        # m/s max lateral command
 CMD_SMOOTH = 0.3             # EMA alpha for velocity command smoothing (lower = smoother)
 
 # Approach speed profile (4 zones by distance)
@@ -180,20 +180,24 @@ def detect_red_object(frame):
 # TELEMETRY
 # =========================
 drone_yaw_deg = 0.0
+drone_roll_deg = 0.0
+drone_pitch_deg = 0.0
 
 
 async def subscribe_telemetry(drone):
-    global drone_yaw_deg
+    global drone_yaw_deg, drone_roll_deg, drone_pitch_deg
 
     async for att in drone.telemetry.attitude_euler():
         drone_yaw_deg = att.yaw_deg
+        drone_roll_deg = att.roll_deg
+        drone_pitch_deg = att.pitch_deg
 
 
 # =========================
 # GUIDANCE
 # =========================
-def compute_guidance(tracker, dist_est, yaw_deg):
-    """Compute NED velocity command using lead pursuit with drift compensation.
+def compute_guidance(tracker, dist_est, yaw_deg, roll_deg, pitch_deg):
+    """Compute NED velocity command using lead pursuit with drift/tilt compensation.
     Returns (vn, ve, vd, info_dict).
     """
     # Approach speed (4-zone profile)
@@ -221,7 +225,15 @@ def compute_guidance(tracker, dist_est, yaw_deg):
     # Predicted target pixel position
     pred_cx, pred_cy, _ = tracker.predict(t_intercept)
 
-    # Normalized pixel error toward predicted position [-1, 1] (clamped to [-1.5, 1.5])
+    # Tilt compensation: remove false centering caused by drone inclination
+    # Roll right → target shifted left in image → add correction to X
+    # Pitch up → target shifted down in image → subtract correction from Y
+    roll_rad = math.radians(roll_deg)
+    pitch_rad = math.radians(pitch_deg)
+    pred_cx += roll_rad * FOCAL_LEN
+    pred_cy -= pitch_rad * FOCAL_LEN
+
+    # Normalized pixel error toward corrected position [-1, 1] (clamped to [-1.5, 1.5])
     ex = (pred_cx - IMAGE_W / 2) / (IMAGE_W / 2)
     ey = (IMAGE_H / 2 - pred_cy) / (IMAGE_H / 2)
     ex = max(-1.5, min(1.5, ex))
@@ -323,7 +335,7 @@ async def run():
                 search_time = 0.0
 
                 dist_est = tracker.distance_estimate(radius_px)
-                vn, ve, vd, info = compute_guidance(tracker, dist_est, drone_yaw_deg)
+                vn, ve, vd, info = compute_guidance(tracker, dist_est, drone_yaw_deg, drone_roll_deg, drone_pitch_deg)
 
                 # Smooth velocity commands to prevent jerky direction changes
                 a = CMD_SMOOTH
@@ -366,7 +378,7 @@ async def run():
                     dt_since = frames_lost / 30.0
                     _, _, pred_r = tracker.predict(dt_since)
                     dist_est = tracker.distance_estimate(pred_r)
-                    vn, ve, vd, info = compute_guidance(tracker, dist_est, drone_yaw_deg)
+                    vn, ve, vd, info = compute_guidance(tracker, dist_est, drone_yaw_deg, drone_roll_deg, drone_pitch_deg)
                     vd *= 0.5
 
                     a = CMD_SMOOTH
@@ -386,7 +398,7 @@ async def run():
                     dt_since = frames_lost / 30.0
                     _, _, pred_r = tracker.predict(dt_since)
                     dist_est = tracker.distance_estimate(pred_r)
-                    vn, ve, vd, info = compute_guidance(tracker, dist_est, drone_yaw_deg)
+                    vn, ve, vd, info = compute_guidance(tracker, dist_est, drone_yaw_deg, drone_roll_deg, drone_pitch_deg)
                     vn *= confidence
                     ve *= confidence
                     vd *= 0.3 * confidence
