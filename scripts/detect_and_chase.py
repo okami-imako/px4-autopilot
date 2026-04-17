@@ -1,5 +1,6 @@
 import asyncio
 import math
+import time
 import numpy as np
 import cv2
 from mavsdk import System
@@ -9,38 +10,136 @@ from mavsdk.offboard import VelocityNedYaw
 # =========================
 # CONSTANTS
 # =========================
-SPHERE_RADIUS = 0.5  # meters (1m diameter)
+
+# Camera & geometry
+SPHERE_RADIUS = 0.5          # meters (1m diameter)
 IMAGE_W = 1024
 IMAGE_H = 768
 HFOV = math.radians(107)
 FOCAL_LEN = (IMAGE_W / 2) / math.tan(HFOV / 2)
-CAMERA_TILT = math.radians(90)  # straight up
-HIT_DISTANCE = 1.0  # meters — close enough to count as a hit
+HIT_DISTANCE = 1.0           # meters — close enough to count as a hit
 
-# Velocity control gains
-KP_CENTER = 3.0        # m/s per normalized pixel error
-KP_APPROACH = 2.0      # m/s upward approach speed
-MAX_CENTER_VEL = 4.0   # max lateral velocity
-LUNGE_DISTANCE = 5.0   # meters — start lunging when this close
-LUNGE_SPEED = 5.0      # m/s — velocity toward sphere during lunge
+# Lateral control (PD via lead pursuit)
+KP_CENTER = 4.0              # m/s per normalized pixel error
+MAX_LATERAL_VEL = 6.0        # m/s max lateral command
+
+# Approach speed profile (4 zones by distance)
+APPROACH_FAR_DIST = 12.0     # meters — far/medium boundary
+APPROACH_MED_DIST = 5.0      # meters — medium/close boundary
+APPROACH_CLOSE_DIST = 2.0    # meters — close/terminal boundary
+APPROACH_FAR_SPEED = 3.0     # m/s upward in far zone
+APPROACH_MED_MAX = 7.0       # m/s upward at close end of medium zone
+APPROACH_CLOSE_SPEED = 8.0   # m/s upward in close zone
+APPROACH_TERMINAL_SPEED = 10.0  # m/s max lunge
+DRIFT_BOOST = 1.3            # speed multiplier when visual closing speed is low
+
+# Tracker (EMA velocity estimation)
+EMA_ALPHA = 0.3              # smoothing factor
+MAX_INTERCEPT_TIME = 2.0     # seconds — clamp prediction horizon
+MIN_DT = 0.005               # ignore frames closer than 5ms
+MAX_DT = 0.2                 # reset velocity if gap exceeds 200ms
 
 # Takeoff
-TAKEOFF_SPEED = 2.0    # m/s upward
-TAKEOFF_TIME = 5.0     # seconds to climb
+TAKEOFF_SPEED = 2.0          # m/s upward
+TAKEOFF_TIME = 5.0           # seconds to climb
 
-# Search
-SEARCH_DESCEND = 0.3   # m/s descend during search
-SEARCH_SPEED = 1.5     # m/s lateral during search
-SEARCH_OMEGA = 0.8     # rad/s angular speed of circle
-LOST_FRAMES_TO_SEARCH = 15
+# Search (when target lost)
+SEARCH_ASCEND_SPEED = 1.0    # m/s upward (target is above)
+SEARCH_LATERAL_SPEED = 1.5   # m/s lateral during search
+SEARCH_OMEGA = 0.8           # rad/s angular speed of circle
+LOST_PREDICT_FRAMES = 10     # coast on prediction
+LOST_DECEL_FRAMES = 30       # decelerate, fade prediction
+LOST_SEARCH_FRAMES = 30      # enter full search pattern
 
 
 # =========================
-# STATE
+# TARGET TRACKER
 # =========================
-drone_yaw_deg = 0.0
-lost_frames = 0
-search_time = 0.0
+class TargetTracker:
+    """Tracks target position and velocity in pixel space using EMA filtering."""
+
+    def __init__(self, alpha=EMA_ALPHA):
+        self.alpha = alpha
+        self.prev_cx = None
+        self.prev_cy = None
+        self.prev_radius = None
+        self.prev_time = None
+        # Filtered pixel velocities (pixels/second)
+        self.vx_px = 0.0
+        self.vy_px = 0.0
+        self.vr_px = 0.0
+        self.initialized = False
+        self.frames_since_update = 0
+        self.last_cx = 0.0
+        self.last_cy = 0.0
+        self.last_radius = 0.0
+
+    def update(self, cx, cy, radius, t):
+        """Feed new detection. Returns True if velocity estimate is valid."""
+        self.frames_since_update = 0
+        self.last_cx = cx
+        self.last_cy = cy
+        self.last_radius = radius
+
+        if self.prev_time is not None:
+            dt = t - self.prev_time
+            if dt < MIN_DT:
+                return self.initialized
+            if dt > MAX_DT:
+                self.vx_px = 0.0
+                self.vy_px = 0.0
+                self.vr_px = 0.0
+                self._store(cx, cy, radius, t)
+                self.initialized = True
+                return False
+
+            raw_vx = (cx - self.prev_cx) / dt
+            raw_vy = (cy - self.prev_cy) / dt
+            raw_vr = (radius - self.prev_radius) / dt
+
+            if self.initialized:
+                self.vx_px = self.alpha * raw_vx + (1 - self.alpha) * self.vx_px
+                self.vy_px = self.alpha * raw_vy + (1 - self.alpha) * self.vy_px
+                self.vr_px = self.alpha * raw_vr + (1 - self.alpha) * self.vr_px
+            else:
+                self.vx_px = raw_vx
+                self.vy_px = raw_vy
+                self.vr_px = raw_vr
+                self.initialized = True
+
+        self._store(cx, cy, radius, t)
+        return self.initialized
+
+    def _store(self, cx, cy, radius, t):
+        self.prev_cx = cx
+        self.prev_cy = cy
+        self.prev_radius = radius
+        self.prev_time = t
+
+    def predict(self, dt_forward):
+        """Predict target pixel position dt_forward seconds ahead."""
+        px = self.last_cx + self.vx_px * dt_forward
+        py = self.last_cy + self.vy_px * dt_forward
+        pr = max(self.last_radius + self.vr_px * dt_forward, 1.0)
+        return px, py, pr
+
+    def mark_lost(self):
+        self.frames_since_update += 1
+
+    def distance_estimate(self, radius_px=None):
+        r = radius_px if radius_px is not None else self.last_radius
+        if r < 1.0:
+            return 999.0
+        return SPHERE_RADIUS * FOCAL_LEN / r
+
+    def visual_closing_speed(self):
+        """Estimate closing speed from radius change rate.
+        dist = R*f/r  →  d(dist)/dt = -R*f*vr/r²  →  closing = R*f*vr/r²
+        """
+        r = self.last_radius
+        if r < 1.0:
+            return 0.0
+        return SPHERE_RADIUS * FOCAL_LEN * self.vr_px / (r * r)
 
 
 # =========================
@@ -79,6 +178,9 @@ def detect_red_object(frame):
 # =========================
 # TELEMETRY
 # =========================
+drone_yaw_deg = 0.0
+
+
 async def subscribe_telemetry(drone):
     global drone_yaw_deg
 
@@ -87,11 +189,75 @@ async def subscribe_telemetry(drone):
 
 
 # =========================
+# GUIDANCE
+# =========================
+def compute_guidance(tracker, dist_est, yaw_deg):
+    """Compute NED velocity command using lead pursuit with drift compensation.
+    Returns (vn, ve, vd, info_dict).
+    """
+    # Approach speed (4-zone profile)
+    if dist_est > APPROACH_FAR_DIST:
+        approach_speed = APPROACH_FAR_SPEED
+    elif dist_est > APPROACH_MED_DIST:
+        frac = (APPROACH_FAR_DIST - dist_est) / (APPROACH_FAR_DIST - APPROACH_MED_DIST)
+        approach_speed = APPROACH_FAR_SPEED + frac * (APPROACH_MED_MAX - APPROACH_FAR_SPEED)
+    elif dist_est > APPROACH_CLOSE_DIST:
+        approach_speed = APPROACH_CLOSE_SPEED
+    else:
+        approach_speed = APPROACH_TERMINAL_SPEED
+
+    # Drift compensation: if visual closing speed much lower than commanded, boost
+    vis_cs = tracker.visual_closing_speed()
+    if tracker.initialized and vis_cs < 0.5 * approach_speed:
+        approach_speed *= DRIFT_BOOST
+
+    vd = -approach_speed  # NED: negative = up
+
+    # Intercept time
+    closing_speed = max(approach_speed, 1.0)
+    t_intercept = min(dist_est / closing_speed, MAX_INTERCEPT_TIME)
+
+    # Predicted target pixel position
+    pred_cx, pred_cy, _ = tracker.predict(t_intercept)
+
+    # Normalized pixel error toward predicted position [-1, 1] (clamped to [-1.5, 1.5])
+    ex = (pred_cx - IMAGE_W / 2) / (IMAGE_W / 2)
+    ey = (IMAGE_H / 2 - pred_cy) / (IMAGE_H / 2)
+    ex = max(-1.5, min(1.5, ex))
+    ey = max(-1.5, min(1.5, ey))
+
+    # Yaw-compensated pixel-to-NED
+    yaw_rad = math.radians(yaw_deg)
+    cos_y = math.cos(yaw_rad)
+    sin_y = math.sin(yaw_rad)
+    vn = KP_CENTER * (cos_y * ey - sin_y * ex)
+    ve = KP_CENTER * (sin_y * ey + cos_y * ex)
+
+    # Clamp lateral velocity
+    mag = math.sqrt(vn**2 + ve**2)
+    if mag > MAX_LATERAL_VEL:
+        scale = MAX_LATERAL_VEL / mag
+        vn *= scale
+        ve *= scale
+
+    info = {
+        'dist': dist_est,
+        'approach': approach_speed,
+        't_int': t_intercept,
+        'ex': ex, 'ey': ey,
+        'vx_px': tracker.vx_px,
+        'vy_px': tracker.vy_px,
+        'vis_cs': vis_cs,
+        'pred_cx': pred_cx, 'pred_cy': pred_cy,
+    }
+
+    return vn, ve, vd, info
+
+
+# =========================
 # MAIN
 # =========================
 async def run():
-    global lost_frames, search_time
-
     drone = System()
     await drone.connect(system_address="udpin://0.0.0.0:14540")
 
@@ -101,14 +267,11 @@ async def run():
             print("Connected")
             break
 
-    # Start telemetry
     telemetry_task = asyncio.create_task(subscribe_telemetry(drone))
 
-    # Wait for EKF to initialize (heading from magnetometer)
     print("Waiting for EKF init...")
     await asyncio.sleep(10)
 
-    # Prime offboard with zero velocity
     print("Priming offboard...")
     for _ in range(20):
         await drone.offboard.set_velocity_ned(VelocityNedYaw(0, 0, 0, 0))
@@ -117,7 +280,6 @@ async def run():
     print("Starting offboard...")
     await drone.offboard.start()
 
-    # Arm with retries
     print("Arming...")
     for attempt in range(10):
         try:
@@ -128,7 +290,6 @@ async def run():
             print(f"Arm attempt {attempt + 1} failed: {e}")
             await asyncio.sleep(2)
 
-    # Takeoff: climb at fixed speed
     print("Taking off...")
     await drone.offboard.set_velocity_ned(VelocityNedYaw(0, 0, -TAKEOFF_SPEED, 0))
     await asyncio.sleep(TAKEOFF_TIME)
@@ -141,8 +302,13 @@ async def run():
 
     cv2.namedWindow("Tracking", cv2.WINDOW_NORMAL)
 
+    tracker = TargetTracker()
+    search_time = 0.0
+
     try:
         while True:
+            frame_time = time.monotonic()
+
             ret, frame = cap.read()
             if not ret:
                 continue
@@ -151,31 +317,11 @@ async def run():
 
             if result:
                 cx, cy, radius_px = result
-                lost_frames = 0
+                tracker.update(cx, cy, radius_px, frame_time)
                 search_time = 0.0
 
-                # Pixel error normalized to [-1, 1]
-                ex = (cx - IMAGE_W / 2) / (IMAGE_W / 2)
-                ey = (IMAGE_H / 2 - cy) / (IMAGE_H / 2)
-
-                # Distance estimate from apparent size
-                dist_est = (SPHERE_RADIUS * FOCAL_LEN) / radius_px
-
-                # Centering velocities (camera up, yaw=0: ey→north, ex→east)
-                vn = KP_CENTER * ey
-                ve = KP_CENTER * ex
-
-                if dist_est < LUNGE_DISTANCE:
-                    vd = -LUNGE_SPEED
-                else:
-                    vd = -KP_APPROACH
-
-                # Clamp lateral velocity
-                mag = math.sqrt(vn**2 + ve**2)
-                if mag > MAX_CENTER_VEL:
-                    scale = MAX_CENTER_VEL / mag
-                    vn *= scale
-                    ve *= scale
+                dist_est = tracker.distance_estimate(radius_px)
+                vn, ve, vd, info = compute_guidance(tracker, dist_est, drone_yaw_deg)
 
                 await drone.offboard.set_velocity_ned(
                     VelocityNedYaw(vn, ve, vd, 0.0)
@@ -185,9 +331,17 @@ async def run():
                 cv2.circle(frame, (cx, cy), int(radius_px), (0, 255, 0), 2)
                 cv2.circle(frame, (cx, cy), 4, (255, 0, 0), -1)
                 cv2.circle(frame, (IMAGE_W // 2, IMAGE_H // 2), 4, (0, 0, 255), -1)
+                # Predicted intercept position
+                pcx, pcy = int(info['pred_cx']), int(info['pred_cy'])
+                cv2.circle(frame, (pcx, pcy), 6, (0, 255, 255), 2)
+                cv2.line(frame, (IMAGE_W // 2, IMAGE_H // 2), (pcx, pcy), (0, 255, 255), 1)
 
-                cv2.putText(frame, f"dist: {dist_est:.1f}m  vel: ({vn:.1f},{ve:.1f},{vd:.1f})",
-                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                cv2.putText(frame,
+                    f"d:{dist_est:.1f}m v:({vn:.1f},{ve:.1f},{vd:.1f}) Tint:{info['t_int']:.2f}s",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(frame,
+                    f"vpx:{info['vx_px']:.0f} vpy:{info['vy_px']:.0f} vcs:{info['vis_cs']:.1f}",
+                    (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
                 if dist_est < HIT_DISTANCE:
                     cv2.putText(frame, "HIT!", (IMAGE_W // 2 - 50, IMAGE_H // 2),
@@ -196,19 +350,48 @@ async def run():
                     cv2.waitKey(3000)
                     break
             else:
-                lost_frames += 1
+                tracker.mark_lost()
+                frames_lost = tracker.frames_since_update
 
-                if lost_frames < LOST_FRAMES_TO_SEARCH:
-                    # Brief loss: hover
+                if frames_lost <= LOST_PREDICT_FRAMES and tracker.initialized:
+                    # Phase 1: coast on prediction
+                    dt_since = frames_lost / 30.0
+                    pred_cx, pred_cy, pred_r = tracker.predict(dt_since)
+                    dist_est = tracker.distance_estimate(pred_r)
+                    vn, ve, vd, info = compute_guidance(tracker, dist_est, drone_yaw_deg)
+                    vd *= 0.5  # reduce approach speed while coasting
+
                     await drone.offboard.set_velocity_ned(
-                        VelocityNedYaw(0, 0, 0, 0)
+                        VelocityNedYaw(vn, ve, vd, 0.0)
                     )
+                    cv2.putText(frame, "COASTING...", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+
+                elif frames_lost <= LOST_DECEL_FRAMES and tracker.initialized:
+                    # Phase 2: decelerate, fade prediction
+                    confidence = 1.0 - (frames_lost - LOST_PREDICT_FRAMES) / (LOST_DECEL_FRAMES - LOST_PREDICT_FRAMES)
+                    dt_since = frames_lost / 30.0
+                    pred_cx, pred_cy, pred_r = tracker.predict(dt_since)
+                    dist_est = tracker.distance_estimate(pred_r)
+                    vn, ve, vd, info = compute_guidance(tracker, dist_est, drone_yaw_deg)
+                    vn *= confidence
+                    ve *= confidence
+                    vd *= 0.3 * confidence
+
+                    await drone.offboard.set_velocity_ned(
+                        VelocityNedYaw(vn, ve, vd, 0.0)
+                    )
+                    cv2.putText(frame, f"DECELERATING... {confidence:.0%}", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+
                 else:
-                    # Search: fly in circles + descend
+                    # Phase 3: search — ascend + circle biased toward last known velocity
                     search_time += 1.0 / 30.0
-                    vn = SEARCH_SPEED * math.cos(SEARCH_OMEGA * search_time)
-                    ve = SEARCH_SPEED * math.sin(SEARCH_OMEGA * search_time)
-                    vd = SEARCH_DESCEND
+                    bias_dir = math.atan2(tracker.vx_px, -tracker.vy_px) if tracker.initialized else 0.0
+                    angle = SEARCH_OMEGA * search_time + bias_dir
+                    vn = SEARCH_LATERAL_SPEED * math.cos(angle)
+                    ve = SEARCH_LATERAL_SPEED * math.sin(angle)
+                    vd = -SEARCH_ASCEND_SPEED  # ascend — target is above
 
                     await drone.offboard.set_velocity_ned(
                         VelocityNedYaw(vn, ve, vd, 0.0)
