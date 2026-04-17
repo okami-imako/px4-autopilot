@@ -20,11 +20,11 @@ FOCAL_LEN = (IMAGE_W / 2) / math.tan(HFOV / 2)
 HIT_DISTANCE = 1.0           # meters — close enough to count as a hit
 
 # Velocity command smoothing
-CMD_SMOOTH = 0.4             # EMA alpha (lower = smoother)
+CMD_SMOOTH = 0.3             # EMA alpha (lower = smoother)
 
-# Lateral control — bearing-proportional with cap
+# Lateral control — feedforward + bearing-proportional with cap
 K_LATERAL = 5.0              # m/s per radian of bearing offset from vertical
-MAX_LATERAL_VEL = 3.0        # m/s — keeps tilt manageable
+MAX_LATERAL_VEL = 4.0        # m/s — room for feedforward + correction
 
 # Vertical speed profile (within MPC_Z_VEL_MAX_UP = 3.0 default)
 APPROACH_FAR_DIST = 10.0
@@ -34,7 +34,7 @@ APPROACH_CLOSE_SPEED = 3.0   # m/s upward — close/terminal
 
 # Tracker (EMA velocity estimation)
 EMA_ALPHA = 0.2              # smoother NED bearing rate
-MAX_INTERCEPT_TIME = 0.5     # seconds — short to reduce noise amplification
+MAX_INTERCEPT_TIME = 1.0     # seconds — moderate prediction for correction direction
 MIN_DT = 0.005
 MAX_DT = 0.2
 
@@ -87,7 +87,7 @@ def ned_to_body(n, e, d, roll_deg, pitch_deg, yaw_deg):
 
 def pixel_to_ned_bearing(cx, cy, roll_deg, pitch_deg, yaw_deg):
     """Convert pixel detection to NED unit bearing vector."""
-    bx = (IMAGE_H / 2 - cy) / FOCAL_LEN
+    bx = (cy - IMAGE_H / 2) / FOCAL_LEN
     by = (cx - IMAGE_W / 2) / FOCAL_LEN
     bz = -1.0
     mag = math.sqrt(bx * bx + by * by + bz * bz)
@@ -104,7 +104,7 @@ def ned_bearing_to_pixel(bn, be, bd, roll_deg, pitch_deg, yaw_deg):
         return IMAGE_W // 2, IMAGE_H // 2
     scale = FOCAL_LEN / (-bz)
     px = int(IMAGE_W / 2 + by * scale)
-    py = int(IMAGE_H / 2 - bx * scale)
+    py = int(IMAGE_H / 2 + bx * scale)
     return px, py
 
 
@@ -285,34 +285,42 @@ def approach_speed(dist):
     return APPROACH_CLOSE_SPEED
 
 
-def compute_guidance(tracker, dist_est):
-    """Compute NED velocity: fixed vertical + bearing-proportional lateral.
+def compute_guidance(tracker, dist_est, prev_cmd):
+    """Compute NED velocity: fixed vertical + feedforward + bearing-proportional lateral.
 
     Vertical: approach_speed (within PX4 limits).
-    Lateral: K_LATERAL × bearing_angle from vertical, capped at MAX_LATERAL_VEL.
-    Direction: from NED bearing (tilt-compensated via rotation matrix).
+    Lateral: feedforward (match target velocity) + K_LATERAL × bearing_angle (close gap).
     """
     vd_speed = approach_speed(dist_est)
     vd = -vd_speed  # NED negative = up
 
+    # Feedforward: estimate target lateral velocity from bearing rate + drone velocity
+    ff_vn = prev_cmd[0] + dist_est * tracker.dbn
+    ff_ve = prev_cmd[1] + dist_est * tracker.dbe
+
+    # Proportional correction from predicted bearing offset
     t_int = min(dist_est / max(vd_speed, 1.0), MAX_INTERCEPT_TIME)
     pn, pe, pd = tracker.predict_bearing(t_int)
-
-    # Lateral: proportional to bearing angle from vertical
     lat_mag = math.sqrt(pn * pn + pe * pe)
     if lat_mag > 0.001:
         angle = math.atan2(lat_mag, -pd)
-        lateral_speed = min(K_LATERAL * angle, MAX_LATERAL_VEL)
-        vn = lateral_speed * (pn / lat_mag)
-        ve = lateral_speed * (pe / lat_mag)
+        corr = K_LATERAL * angle
+        vn = ff_vn + corr * (pn / lat_mag)
+        ve = ff_ve + corr * (pe / lat_mag)
     else:
-        vn = ve = 0.0
+        vn, ve = ff_vn, ff_ve
+
+    # Cap total lateral velocity
+    lat = math.sqrt(vn * vn + ve * ve)
+    if lat > MAX_LATERAL_VEL:
+        vn *= MAX_LATERAL_VEL / lat
+        ve *= MAX_LATERAL_VEL / lat
 
     info = {
         'dist': dist_est, 'vd_speed': vd_speed, 't_int': t_int,
         'bn': pn, 'be': pe, 'bd': pd,
-        'lat_angle': math.degrees(math.atan2(lat_mag, -pd)) if lat_mag > 0.001 else 0.0,
-        'lat_speed': min(K_LATERAL * math.atan2(lat_mag, -pd), MAX_LATERAL_VEL) if lat_mag > 0.001 else 0.0,
+        'lat_angle': math.degrees(angle) if lat_mag > 0.001 else 0.0,
+        'ff': math.sqrt(ff_vn ** 2 + ff_ve ** 2),
     }
 
     return vn, ve, vd, info
@@ -395,7 +403,7 @@ async def run():
                 search_time = 0.0
 
                 dist_est = tracker.distance_estimate(radius_px)
-                vn, ve, vd, info = compute_guidance(tracker, dist_est)
+                vn, ve, vd, info = compute_guidance(tracker, dist_est, cmd)
 
                 sn, se, sd = smooth_cmd(vn, ve, vd, cmd)
                 await drone.offboard.set_velocity_ned(
@@ -419,7 +427,7 @@ async def run():
                     f"v:({sn:.1f},{se:.1f},{sd:.1f})",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 cv2.putText(frame,
-                    f"lat:{info['lat_angle']:.1f}deg {info['lat_speed']:.1f}m/s "
+                    f"lat:{info['lat_angle']:.1f}deg ff:{info['ff']:.1f} "
                     f"Tint:{info['t_int']:.2f}s",
                     (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
@@ -438,7 +446,7 @@ async def run():
                     dt_since = frames_lost / 30.0
                     pred_r = tracker.predict_radius(dt_since)
                     dist_est = tracker.distance_estimate(pred_r)
-                    vn, ve, vd, _ = compute_guidance(tracker, dist_est)
+                    vn, ve, vd, _ = compute_guidance(tracker, dist_est, cmd)
                     sn, se, sd = smooth_cmd(
                         vn * 0.5, ve * 0.5, vd * 0.5, cmd
                     )
@@ -456,7 +464,7 @@ async def run():
                     dt_since = frames_lost / 30.0
                     pred_r = tracker.predict_radius(dt_since)
                     dist_est = tracker.distance_estimate(pred_r)
-                    vn, ve, vd, _ = compute_guidance(tracker, dist_est)
+                    vn, ve, vd, _ = compute_guidance(tracker, dist_est, cmd)
                     fade = 0.3 * confidence
                     sn, se, sd = smooth_cmd(
                         vn * fade, ve * fade, vd * fade, cmd
