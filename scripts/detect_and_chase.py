@@ -26,11 +26,14 @@ CMD_SMOOTH = 0.8             # EMA alpha (lower = smoother)
 K_LATERAL = 15.0              # m/s per radian of bearing offset from vertical
 MAX_LATERAL_VEL = 25.0        # m/s — room for feedforward + correction
 
-# Vertical speed profile (within MPC_Z_VEL_MAX_UP = 3.0 default)
+# Vertical approach — own budget, capped by MPC_Z_VEL_MAX_UP
+VERT_APPROACH_SPEED = 3.0    # m/s — PX4 max, scaled by bearing D
+
+# Lateral approach — own budget, separate from vertical
 APPROACH_FAR_DIST = 10.0
 APPROACH_CLOSE_DIST = 3.0
-APPROACH_FAR_SPEED = 10.0    # m/s — distributed along bearing, not just vertical
-APPROACH_CLOSE_SPEED = 8.0   # m/s — slow down for final approach
+APPROACH_FAR_SPEED = 10.0    # m/s — lateral closing speed far
+APPROACH_CLOSE_SPEED = 8.0   # m/s — lateral closing speed near
 
 # Tracker (EMA velocity estimation)
 EMA_ALPHA = 0.2              # smoother NED bearing rate
@@ -301,17 +304,14 @@ def compute_guidance(tracker, dist_est, prev_cmd):
     t_int = min(dist_est / max(speed, 1.0), MAX_INTERCEPT_TIME)
     pn, pe, pd = tracker.predict_bearing(t_int)
 
-    # Vertical: cap at PX4 limit, redistribute excess to lateral
-    MAX_VERT_SPEED = 3.0  # MPC_Z_VEL_MAX_UP
-    vd = max(-MAX_VERT_SPEED, min(MAX_VERT_SPEED, speed * pd))
+    # Vertical: own budget, scaled by bearing D
+    vd = VERT_APPROACH_SPEED * pd
 
-    # Lateral approach: remaining speed budget after vertical
-    lateral_budget = math.sqrt(max(speed * speed - vd * vd, 0.0))
-
+    # Lateral: own budget, along bearing lateral direction
     lat_mag = math.sqrt(pn * pn + pe * pe)
     if lat_mag > 0.001:
-        approach_vn = lateral_budget * (pn / lat_mag)
-        approach_ve = lateral_budget * (pe / lat_mag)
+        approach_vn = speed * pn
+        approach_ve = speed * pe
         angle = math.atan2(lat_mag, -pd)
         corr = K_LATERAL * angle
         vn = approach_vn + ff_vn + corr * (pn / lat_mag)
