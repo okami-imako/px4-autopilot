@@ -20,8 +20,9 @@ FOCAL_LEN = (IMAGE_W / 2) / math.tan(HFOV / 2)
 HIT_DISTANCE = 1.0           # meters — close enough to count as a hit
 
 # Lateral control (PD via lead pursuit)
-KP_CENTER = 4.0              # m/s per normalized pixel error
-MAX_LATERAL_VEL = 6.0        # m/s max lateral command
+KP_CENTER = 2.5              # m/s per normalized pixel error
+MAX_LATERAL_VEL = 4.0        # m/s max lateral command
+CMD_SMOOTH = 0.3             # EMA alpha for velocity command smoothing (lower = smoother)
 
 # Approach speed profile (4 zones by distance)
 APPROACH_FAR_DIST = 12.0     # meters — far/medium boundary
@@ -304,6 +305,7 @@ async def run():
 
     tracker = TargetTracker()
     search_time = 0.0
+    cmd_vn, cmd_ve, cmd_vd = 0.0, 0.0, 0.0  # smoothed velocity commands
 
     try:
         while True:
@@ -323,8 +325,14 @@ async def run():
                 dist_est = tracker.distance_estimate(radius_px)
                 vn, ve, vd, info = compute_guidance(tracker, dist_est, drone_yaw_deg)
 
+                # Smooth velocity commands to prevent jerky direction changes
+                a = CMD_SMOOTH
+                cmd_vn = a * vn + (1 - a) * cmd_vn
+                cmd_ve = a * ve + (1 - a) * cmd_ve
+                cmd_vd = a * vd + (1 - a) * cmd_vd
+
                 await drone.offboard.set_velocity_ned(
-                    VelocityNedYaw(vn, ve, vd, 0.0)
+                    VelocityNedYaw(cmd_vn, cmd_ve, cmd_vd, 0.0)
                 )
 
                 # Visualization
@@ -356,13 +364,18 @@ async def run():
                 if frames_lost <= LOST_PREDICT_FRAMES and tracker.initialized:
                     # Phase 1: coast on prediction
                     dt_since = frames_lost / 30.0
-                    pred_cx, pred_cy, pred_r = tracker.predict(dt_since)
+                    _, _, pred_r = tracker.predict(dt_since)
                     dist_est = tracker.distance_estimate(pred_r)
                     vn, ve, vd, info = compute_guidance(tracker, dist_est, drone_yaw_deg)
-                    vd *= 0.5  # reduce approach speed while coasting
+                    vd *= 0.5
+
+                    a = CMD_SMOOTH
+                    cmd_vn = a * vn + (1 - a) * cmd_vn
+                    cmd_ve = a * ve + (1 - a) * cmd_ve
+                    cmd_vd = a * vd + (1 - a) * cmd_vd
 
                     await drone.offboard.set_velocity_ned(
-                        VelocityNedYaw(vn, ve, vd, 0.0)
+                        VelocityNedYaw(cmd_vn, cmd_ve, cmd_vd, 0.0)
                     )
                     cv2.putText(frame, "COASTING...", (10, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
@@ -371,15 +384,20 @@ async def run():
                     # Phase 2: decelerate, fade prediction
                     confidence = 1.0 - (frames_lost - LOST_PREDICT_FRAMES) / (LOST_DECEL_FRAMES - LOST_PREDICT_FRAMES)
                     dt_since = frames_lost / 30.0
-                    pred_cx, pred_cy, pred_r = tracker.predict(dt_since)
+                    _, _, pred_r = tracker.predict(dt_since)
                     dist_est = tracker.distance_estimate(pred_r)
                     vn, ve, vd, info = compute_guidance(tracker, dist_est, drone_yaw_deg)
                     vn *= confidence
                     ve *= confidence
                     vd *= 0.3 * confidence
 
+                    a = CMD_SMOOTH
+                    cmd_vn = a * vn + (1 - a) * cmd_vn
+                    cmd_ve = a * ve + (1 - a) * cmd_ve
+                    cmd_vd = a * vd + (1 - a) * cmd_vd
+
                     await drone.offboard.set_velocity_ned(
-                        VelocityNedYaw(vn, ve, vd, 0.0)
+                        VelocityNedYaw(cmd_vn, cmd_ve, cmd_vd, 0.0)
                     )
                     cv2.putText(frame, f"DECELERATING... {confidence:.0%}", (10, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
@@ -393,8 +411,13 @@ async def run():
                     ve = SEARCH_LATERAL_SPEED * math.sin(angle)
                     vd = -SEARCH_ASCEND_SPEED  # ascend — target is above
 
+                    a = CMD_SMOOTH
+                    cmd_vn = a * vn + (1 - a) * cmd_vn
+                    cmd_ve = a * ve + (1 - a) * cmd_ve
+                    cmd_vd = a * vd + (1 - a) * cmd_vd
+
                     await drone.offboard.set_velocity_ned(
-                        VelocityNedYaw(vn, ve, vd, 0.0)
+                        VelocityNedYaw(cmd_vn, cmd_ve, cmd_vd, 0.0)
                     )
                     cv2.putText(frame, "SEARCHING...", (10, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
