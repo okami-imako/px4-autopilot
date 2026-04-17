@@ -20,17 +20,17 @@ FOCAL_LEN = (IMAGE_W / 2) / math.tan(HFOV / 2)
 HIT_DISTANCE = 1.0           # meters — close enough to count as a hit
 
 # Velocity command smoothing
-CMD_SMOOTH = 0.5             # EMA alpha (lower = smoother)
+CMD_SMOOTH = 0.8             # EMA alpha (lower = smoother)
 
 # Lateral control — feedforward + bearing-proportional with cap
-K_LATERAL = 8.0              # m/s per radian of bearing offset from vertical
-MAX_LATERAL_VEL = 15.0        # m/s — room for feedforward + correction
+K_LATERAL = 15.0              # m/s per radian of bearing offset from vertical
+MAX_LATERAL_VEL = 25.0        # m/s — room for feedforward + correction
 
 # Vertical speed profile (within MPC_Z_VEL_MAX_UP = 3.0 default)
 APPROACH_FAR_DIST = 10.0
 APPROACH_CLOSE_DIST = 3.0
-APPROACH_FAR_SPEED = 2.5     # m/s upward — far zone
-APPROACH_CLOSE_SPEED = 3.0   # m/s upward — close/terminal
+APPROACH_FAR_SPEED = 5.0     # m/s upward — far zone
+APPROACH_CLOSE_SPEED = 5.0   # m/s upward — close/terminal
 
 # Tracker (EMA velocity estimation)
 EMA_ALPHA = 0.2              # smoother NED bearing rate
