@@ -23,102 +23,188 @@ HIT_DISTANCE = 1.0           # meters — close enough to count as a hit
 CMD_SMOOTH = 0.3             # EMA alpha (lower = smoother)
 
 # Approach speed profile (4 zones) — total 3D speed toward target
-APPROACH_FAR_DIST = 15.0     # meters — far/medium boundary
-APPROACH_MED_DIST = 5.0      # meters — medium/close boundary
-APPROACH_CLOSE_DIST = 2.0    # meters — close/terminal boundary
-APPROACH_FAR_SPEED = 5.0     # m/s in far zone
-APPROACH_MED_MAX = 10.0      # m/s at close end of medium zone
-APPROACH_CLOSE_SPEED = 12.0  # m/s in close zone
-APPROACH_TERMINAL_SPEED = 12.0  # m/s max lunge
-DRIFT_BOOST = 1.3            # speed multiplier when visual closing speed is low
+APPROACH_FAR_DIST = 15.0
+APPROACH_MED_DIST = 5.0
+APPROACH_CLOSE_DIST = 2.0
+APPROACH_FAR_SPEED = 5.0
+APPROACH_MED_MAX = 10.0
+APPROACH_CLOSE_SPEED = 12.0
+APPROACH_TERMINAL_SPEED = 12.0
+DRIFT_BOOST = 1.3
 
 # Tracker (EMA velocity estimation)
-EMA_ALPHA = 0.3              # smoothing factor
-MAX_INTERCEPT_TIME = 2.0     # seconds — clamp prediction horizon
-MIN_DT = 0.005               # ignore frames closer than 5ms
-MAX_DT = 0.2                 # reset velocity if gap exceeds 200ms
+EMA_ALPHA = 0.3
+MAX_INTERCEPT_TIME = 2.0
+MIN_DT = 0.005
+MAX_DT = 0.2
 
 # Takeoff
-TAKEOFF_SPEED = 2.0          # m/s upward
-TAKEOFF_TIME = 5.0           # seconds to climb
+TAKEOFF_SPEED = 2.0
+TAKEOFF_TIME = 5.0
 
 # Search (when target lost)
-SEARCH_ASCEND_SPEED = 1.0    # m/s upward
-SEARCH_LATERAL_SPEED = 1.5   # m/s lateral during search
-SEARCH_OMEGA = 0.8           # rad/s angular speed of circle
-LOST_PREDICT_FRAMES = 10     # coast on prediction
-LOST_DECEL_FRAMES = 30       # decelerate, fade prediction
+SEARCH_ASCEND_SPEED = 1.0
+SEARCH_LATERAL_SPEED = 1.5
+SEARCH_OMEGA = 0.8
+LOST_PREDICT_FRAMES = 10
+LOST_DECEL_FRAMES = 30
 
 
 # =========================
-# TARGET TRACKER
+# ROTATION HELPERS
+# =========================
+def body_to_ned(bx, by, bz, roll_deg, pitch_deg, yaw_deg):
+    """Rotate body-frame vector to NED using ZYX Euler convention.
+    PX4 body: X forward, Y right, Z down.
+    """
+    phi = math.radians(roll_deg)
+    theta = math.radians(pitch_deg)
+    psi = math.radians(yaw_deg)
+    cp, sp = math.cos(phi), math.sin(phi)
+    ct, st = math.cos(theta), math.sin(theta)
+    cy, sy = math.cos(psi), math.sin(psi)
+
+    n = cy * ct * bx + (cy * st * sp - sy * cp) * by + (cy * st * cp + sy * sp) * bz
+    e = sy * ct * bx + (sy * st * sp + cy * cp) * by + (sy * st * cp - cy * sp) * bz
+    d = -st * bx + ct * sp * by + ct * cp * bz
+    return n, e, d
+
+
+def ned_to_body(n, e, d, roll_deg, pitch_deg, yaw_deg):
+    """Rotate NED vector to body frame (transpose of body_to_ned)."""
+    phi = math.radians(roll_deg)
+    theta = math.radians(pitch_deg)
+    psi = math.radians(yaw_deg)
+    cp, sp = math.cos(phi), math.sin(phi)
+    ct, st = math.cos(theta), math.sin(theta)
+    cy, sy = math.cos(psi), math.sin(psi)
+
+    bx = cy * ct * n + sy * ct * e - st * d
+    by = (cy * st * sp - sy * cp) * n + (sy * st * sp + cy * cp) * e + ct * sp * d
+    bz = (cy * st * cp + sy * sp) * n + (sy * st * cp - cy * sp) * e + ct * cp * d
+    return bx, by, bz
+
+
+def pixel_to_ned_bearing(cx, cy, roll_deg, pitch_deg, yaw_deg):
+    """Convert pixel detection to NED unit bearing vector."""
+    bx = (IMAGE_H / 2 - cy) / FOCAL_LEN
+    by = (cx - IMAGE_W / 2) / FOCAL_LEN
+    bz = -1.0
+    mag = math.sqrt(bx * bx + by * by + bz * bz)
+    n, e, d = body_to_ned(bx / mag, by / mag, bz / mag,
+                           roll_deg, pitch_deg, yaw_deg)
+    mag = math.sqrt(n * n + e * e + d * d)
+    return n / mag, e / mag, d / mag
+
+
+def ned_bearing_to_pixel(bn, be, bd, roll_deg, pitch_deg, yaw_deg):
+    """Convert NED bearing back to pixel coords (for visualization)."""
+    bx, by, bz = ned_to_body(bn, be, bd, roll_deg, pitch_deg, yaw_deg)
+    if bz > -0.01:
+        return IMAGE_W // 2, IMAGE_H // 2
+    scale = FOCAL_LEN / (-bz)
+    px = int(IMAGE_W / 2 + by * scale)
+    py = int(IMAGE_H / 2 - bx * scale)
+    return px, py
+
+
+# =========================
+# TARGET TRACKER (NED bearing space)
 # =========================
 class TargetTracker:
-    """Tracks target position and velocity in pixel space using EMA filtering."""
+    """Tracks target NED bearing and radius using EMA filtering.
+
+    Bearing is tracked in NED frame to eliminate drone-tilt contamination.
+    Pixel velocity from drone roll/pitch shifts does NOT affect the estimate.
+    """
 
     def __init__(self, alpha=EMA_ALPHA):
         self.alpha = alpha
-        self.prev_cx = None
-        self.prev_cy = None
-        self.prev_radius = None
+        # NED bearing state
+        self.prev_bn = None
+        self.prev_be = None
+        self.prev_bd = None
         self.prev_time = None
-        self.vx_px = 0.0
-        self.vy_px = 0.0
+        self.dbn = 0.0
+        self.dbe = 0.0
+        self.dbd = 0.0
+        # Radius (pixel space, for distance estimation)
+        self.prev_radius = None
         self.vr_px = 0.0
-        self.initialized = False
-        self.frames_since_update = 0
+        # Current values
+        self.last_bn = 0.0
+        self.last_be = 0.0
+        self.last_bd = -1.0
+        self.last_radius = 0.0
         self.last_cx = 0.0
         self.last_cy = 0.0
-        self.last_radius = 0.0
+        #
+        self.initialized = False
+        self.frames_since_update = 0
 
-    def update(self, cx, cy, radius, t):
-        """Feed new detection. Returns True if velocity estimate is valid."""
+    def update(self, cx, cy, radius, roll_deg, pitch_deg, yaw_deg, t):
+        """Feed new detection with current attitude. Returns True if velocity valid."""
         self.frames_since_update = 0
         self.last_cx = cx
         self.last_cy = cy
         self.last_radius = radius
+
+        bn, be, bd = pixel_to_ned_bearing(cx, cy, roll_deg, pitch_deg, yaw_deg)
+        self.last_bn = bn
+        self.last_be = be
+        self.last_bd = bd
 
         if self.prev_time is not None:
             dt = t - self.prev_time
             if dt < MIN_DT:
                 return self.initialized
             if dt > MAX_DT:
-                self.vx_px = 0.0
-                self.vy_px = 0.0
+                self.dbn = self.dbe = self.dbd = 0.0
                 self.vr_px = 0.0
-                self._store(cx, cy, radius, t)
+                self._store(bn, be, bd, radius, t)
                 self.initialized = True
                 return False
 
-            raw_vx = (cx - self.prev_cx) / dt
-            raw_vy = (cy - self.prev_cy) / dt
+            raw_dbn = (bn - self.prev_bn) / dt
+            raw_dbe = (be - self.prev_be) / dt
+            raw_dbd = (bd - self.prev_bd) / dt
             raw_vr = (radius - self.prev_radius) / dt
 
             if self.initialized:
-                self.vx_px = self.alpha * raw_vx + (1 - self.alpha) * self.vx_px
-                self.vy_px = self.alpha * raw_vy + (1 - self.alpha) * self.vy_px
+                self.dbn = self.alpha * raw_dbn + (1 - self.alpha) * self.dbn
+                self.dbe = self.alpha * raw_dbe + (1 - self.alpha) * self.dbe
+                self.dbd = self.alpha * raw_dbd + (1 - self.alpha) * self.dbd
                 self.vr_px = self.alpha * raw_vr + (1 - self.alpha) * self.vr_px
             else:
-                self.vx_px = raw_vx
-                self.vy_px = raw_vy
+                self.dbn = raw_dbn
+                self.dbe = raw_dbe
+                self.dbd = raw_dbd
                 self.vr_px = raw_vr
                 self.initialized = True
 
-        self._store(cx, cy, radius, t)
+        self._store(bn, be, bd, radius, t)
         return self.initialized
 
-    def _store(self, cx, cy, radius, t):
-        self.prev_cx = cx
-        self.prev_cy = cy
+    def _store(self, bn, be, bd, radius, t):
+        self.prev_bn = bn
+        self.prev_be = be
+        self.prev_bd = bd
         self.prev_radius = radius
         self.prev_time = t
 
-    def predict(self, dt_forward):
-        """Predict target pixel position dt_forward seconds ahead."""
-        px = self.last_cx + self.vx_px * dt_forward
-        py = self.last_cy + self.vy_px * dt_forward
-        pr = max(self.last_radius + self.vr_px * dt_forward, 1.0)
-        return px, py, pr
+    def predict_bearing(self, dt_forward):
+        """Predict NED bearing dt_forward seconds ahead. Returns unit vector."""
+        pn = self.last_bn + self.dbn * dt_forward
+        pe = self.last_be + self.dbe * dt_forward
+        pd = self.last_bd + self.dbd * dt_forward
+        mag = math.sqrt(pn * pn + pe * pe + pd * pd)
+        if mag < 1e-6:
+            return 0.0, 0.0, -1.0
+        return pn / mag, pe / mag, pd / mag
+
+    def predict_radius(self, dt_forward):
+        """Predict pixel radius dt_forward seconds ahead."""
+        return max(self.last_radius + self.vr_px * dt_forward, 1.0)
 
     def mark_lost(self):
         self.frames_since_update += 1
@@ -130,9 +216,6 @@ class TargetTracker:
         return SPHERE_RADIUS * FOCAL_LEN / r
 
     def visual_closing_speed(self):
-        """Estimate closing speed from radius change rate.
-        dist = R*f/r  →  d(dist)/dt = -R*f*vr/r²  →  closing = R*f*vr/r²
-        """
         r = self.last_radius
         if r < 1.0:
             return 0.0
@@ -192,26 +275,6 @@ async def subscribe_telemetry(drone):
 # =========================
 # GUIDANCE
 # =========================
-def body_to_ned(bx, by, bz, roll_deg, pitch_deg, yaw_deg):
-    """Rotate body-frame vector to NED using ZYX Euler convention.
-    PX4 body: X forward, Y right, Z down.
-    NED: X north, Y east, Z down.
-    """
-    phi = math.radians(roll_deg)
-    theta = math.radians(pitch_deg)
-    psi = math.radians(yaw_deg)
-
-    cp, sp = math.cos(phi), math.sin(phi)
-    ct, st = math.cos(theta), math.sin(theta)
-    cy, sy = math.cos(psi), math.sin(psi)
-
-    n = cy * ct * bx + (cy * st * sp - sy * cp) * by + (cy * st * cp + sy * sp) * bz
-    e = sy * ct * bx + (sy * st * sp + cy * cp) * by + (sy * st * cp - cy * sp) * bz
-    d = -st * bx + ct * sp * by + ct * cp * bz
-
-    return n, e, d
-
-
 def approach_speed(dist):
     """4-zone speed profile. Returns total 3D speed toward target."""
     if dist > APPROACH_FAR_DIST:
@@ -224,57 +287,35 @@ def approach_speed(dist):
     return APPROACH_TERMINAL_SPEED
 
 
-def compute_guidance(tracker, dist_est, roll_deg, pitch_deg, yaw_deg):
+def compute_guidance(tracker, dist_est):
     """Compute NED velocity using bearing-based 3D pursuit.
 
-    Pixel → body-frame bearing → NED (full rotation matrix) → velocity = speed × direction.
-    Tilt compensation is exact (rotation matrix, not approximation).
-    Speed naturally splits vertical/lateral based on where target is.
+    Tracker provides NED bearing (tilt-free). Speed × bearing = velocity.
     """
     speed = approach_speed(dist_est)
 
-    # Drift compensation: boost if visual closing speed much lower than commanded
     vis_cs = tracker.visual_closing_speed()
     if tracker.initialized and vis_cs < 0.5 * speed:
         speed *= DRIFT_BOOST
 
-    # Lead pursuit: predict target pixel position at intercept time
     t_int = min(dist_est / max(speed, 1.0), MAX_INTERCEPT_TIME)
-    pred_cx, pred_cy, _ = tracker.predict(t_int)
+    pn, pe, pd = tracker.predict_bearing(t_int)
 
-    # Body-frame bearing from predicted pixel position
-    # Camera-to-body mapping (empirically confirmed):
-    #   image up (lower cy) → body +X (forward)
-    #   image right (higher cx) → body +Y (right)
-    #   optical axis (up) → body -Z
-    bx = (IMAGE_H / 2 - pred_cy) / FOCAL_LEN
-    by = (pred_cx - IMAGE_W / 2) / FOCAL_LEN
-    bz = -1.0
-    mag = math.sqrt(bx * bx + by * by + bz * bz)
-    bx /= mag
-    by /= mag
-    bz /= mag
-
-    # Rotate body bearing to NED using full attitude
-    vn, ve, vd = body_to_ned(bx, by, bz, roll_deg, pitch_deg, yaw_deg)
-
-    # Scale by speed
-    vn *= speed
-    ve *= speed
-    vd *= speed
+    vn = speed * pn
+    ve = speed * pe
+    vd = speed * pd
 
     info = {
         'dist': dist_est, 'speed': speed, 't_int': t_int,
-        'bx': bx, 'by': by, 'bz': bz,
-        'vx_px': tracker.vx_px, 'vy_px': tracker.vy_px,
+        'bn': pn, 'be': pe, 'bd': pd,
+        'dbn': tracker.dbn, 'dbe': tracker.dbe,
         'vis_cs': vis_cs,
-        'pred_cx': pred_cx, 'pred_cy': pred_cy,
     }
 
     return vn, ve, vd, info
 
 
-def smooth_and_send(vn, ve, vd, cmd, alpha=CMD_SMOOTH):
+def smooth_cmd(vn, ve, vd, cmd, alpha=CMD_SMOOTH):
     """EMA-smooth velocity commands. Mutates cmd list [vn, ve, vd]."""
     cmd[0] = alpha * vn + (1 - alpha) * cmd[0]
     cmd[1] = alpha * ve + (1 - alpha) * cmd[1]
@@ -332,7 +373,7 @@ async def run():
 
     tracker = TargetTracker()
     search_time = 0.0
-    cmd = [0.0, 0.0, 0.0]  # smoothed [vn, ve, vd]
+    cmd = [0.0, 0.0, 0.0]
 
     try:
         while True:
@@ -342,20 +383,18 @@ async def run():
             if not ret:
                 continue
 
+            roll, pitch, yaw = drone_roll_deg, drone_pitch_deg, drone_yaw_deg
             result = detect_red_object(frame)
 
             if result:
                 cx, cy, radius_px = result
-                tracker.update(cx, cy, radius_px, frame_time)
+                tracker.update(cx, cy, radius_px, roll, pitch, yaw, frame_time)
                 search_time = 0.0
 
                 dist_est = tracker.distance_estimate(radius_px)
-                vn, ve, vd, info = compute_guidance(
-                    tracker, dist_est,
-                    drone_roll_deg, drone_pitch_deg, drone_yaw_deg
-                )
+                vn, ve, vd, info = compute_guidance(tracker, dist_est)
 
-                sn, se, sd = smooth_and_send(vn, ve, vd, cmd)
+                sn, se, sd = smooth_cmd(vn, ve, vd, cmd)
                 await drone.offboard.set_velocity_ned(
                     VelocityNedYaw(sn, se, sd, 0.0)
                 )
@@ -364,7 +403,10 @@ async def run():
                 cv2.circle(frame, (cx, cy), int(radius_px), (0, 255, 0), 2)
                 cv2.circle(frame, (cx, cy), 4, (255, 0, 0), -1)
                 cv2.circle(frame, (IMAGE_W // 2, IMAGE_H // 2), 4, (0, 0, 255), -1)
-                pcx, pcy = int(info['pred_cx']), int(info['pred_cy'])
+                # Show predicted bearing in image
+                pcx, pcy = ned_bearing_to_pixel(
+                    info['bn'], info['be'], info['bd'], roll, pitch, yaw
+                )
                 cv2.circle(frame, (pcx, pcy), 6, (0, 255, 255), 2)
                 cv2.line(frame, (IMAGE_W // 2, IMAGE_H // 2), (pcx, pcy),
                          (0, 255, 255), 1)
@@ -374,7 +416,7 @@ async def run():
                     f"v:({sn:.1f},{se:.1f},{sd:.1f})",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 cv2.putText(frame,
-                    f"bear:({info['bx']:.2f},{info['by']:.2f},{info['bz']:.2f}) "
+                    f"bear:({info['bn']:.2f},{info['be']:.2f},{info['bd']:.2f}) "
                     f"Tint:{info['t_int']:.2f}s",
                     (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
@@ -391,13 +433,10 @@ async def run():
 
                 if frames_lost <= LOST_PREDICT_FRAMES and tracker.initialized:
                     dt_since = frames_lost / 30.0
-                    _, _, pred_r = tracker.predict(dt_since)
+                    pred_r = tracker.predict_radius(dt_since)
                     dist_est = tracker.distance_estimate(pred_r)
-                    vn, ve, vd, _ = compute_guidance(
-                        tracker, dist_est,
-                        drone_roll_deg, drone_pitch_deg, drone_yaw_deg
-                    )
-                    sn, se, sd = smooth_and_send(
+                    vn, ve, vd, _ = compute_guidance(tracker, dist_est)
+                    sn, se, sd = smooth_cmd(
                         vn * 0.5, ve * 0.5, vd * 0.5, cmd
                     )
                     await drone.offboard.set_velocity_ned(
@@ -412,14 +451,11 @@ async def run():
                         / (LOST_DECEL_FRAMES - LOST_PREDICT_FRAMES)
                     )
                     dt_since = frames_lost / 30.0
-                    _, _, pred_r = tracker.predict(dt_since)
+                    pred_r = tracker.predict_radius(dt_since)
                     dist_est = tracker.distance_estimate(pred_r)
-                    vn, ve, vd, _ = compute_guidance(
-                        tracker, dist_est,
-                        drone_roll_deg, drone_pitch_deg, drone_yaw_deg
-                    )
+                    vn, ve, vd, _ = compute_guidance(tracker, dist_est)
                     fade = 0.3 * confidence
-                    sn, se, sd = smooth_and_send(
+                    sn, se, sd = smooth_cmd(
                         vn * fade, ve * fade, vd * fade, cmd
                     )
                     await drone.offboard.set_velocity_ned(
@@ -432,7 +468,7 @@ async def run():
                 else:
                     search_time += 1.0 / 30.0
                     bias_dir = (
-                        math.atan2(tracker.vx_px, -tracker.vy_px)
+                        math.atan2(tracker.dbe, tracker.dbn)
                         if tracker.initialized else 0.0
                     )
                     angle = SEARCH_OMEGA * search_time + bias_dir
@@ -440,7 +476,7 @@ async def run():
                     ve = SEARCH_LATERAL_SPEED * math.sin(angle)
                     vd = -SEARCH_ASCEND_SPEED
 
-                    sn, se, sd = smooth_and_send(vn, ve, vd, cmd)
+                    sn, se, sd = smooth_cmd(vn, ve, vd, cmd)
                     await drone.offboard.set_velocity_ned(
                         VelocityNedYaw(sn, se, sd, 0.0)
                     )
