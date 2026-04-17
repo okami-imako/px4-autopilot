@@ -23,8 +23,8 @@ HIT_DISTANCE = 1.0           # meters — close enough to count as a hit
 CMD_SMOOTH = 0.5             # EMA alpha (lower = smoother)
 
 # Lateral control — feedforward + bearing-proportional with cap
-K_LATERAL = 4.0              # m/s per radian of bearing offset from vertical
-MAX_LATERAL_VEL = 12.0        # m/s — room for feedforward + correction
+K_LATERAL = 8.0              # m/s per radian of bearing offset from vertical
+MAX_LATERAL_VEL = 15.0        # m/s — room for feedforward + correction
 
 # Vertical speed profile (within MPC_Z_VEL_MAX_UP = 3.0 default)
 APPROACH_FAR_DIST = 10.0
@@ -286,32 +286,35 @@ def approach_speed(dist):
 
 
 def compute_guidance(tracker, dist_est, prev_cmd):
-    """Compute NED velocity: bearing-dependent vertical + feedforward + proportional lateral.
+    """Compute NED velocity: approach along bearing + feedforward + proportional lateral.
 
-    Vertical: approach_speed scaled by bearing D component (auto-adjusts to target altitude).
-    Lateral: feedforward (match target velocity) + K_LATERAL × bearing_angle (close gap).
+    Approach speed distributed along full bearing direction (vertical AND lateral).
+    Feedforward matches target velocity. Proportional correction closes bearing gap.
     """
-    vd_speed = approach_speed(dist_est)
+    speed = approach_speed(dist_est)
 
     # Feedforward: estimate target lateral velocity from bearing rate + drone velocity
     ff_vn = prev_cmd[0] + dist_est * tracker.dbn
     ff_ve = prev_cmd[1] + dist_est * tracker.dbe
 
     # Proportional correction from predicted bearing offset
-    t_int = min(dist_est / max(vd_speed, 1.0), MAX_INTERCEPT_TIME)
+    t_int = min(dist_est / max(speed, 1.0), MAX_INTERCEPT_TIME)
     pn, pe, pd = tracker.predict_bearing(t_int)
 
-    # Vertical: scale by bearing D (pd<0 = target above = go up, pd>0 = below = descend)
-    vd = vd_speed * pd
+    # Approach along full bearing direction (not just vertical)
+    vd = speed * pd
+    approach_vn = speed * pn
+    approach_ve = speed * pe
 
     lat_mag = math.sqrt(pn * pn + pe * pe)
     if lat_mag > 0.001:
         angle = math.atan2(lat_mag, -pd)
         corr = K_LATERAL * angle
-        vn = ff_vn + corr * (pn / lat_mag)
-        ve = ff_ve + corr * (pe / lat_mag)
+        vn = approach_vn + ff_vn + corr * (pn / lat_mag)
+        ve = approach_ve + ff_ve + corr * (pe / lat_mag)
     else:
-        vn, ve = ff_vn, ff_ve
+        vn = approach_vn + ff_vn
+        ve = approach_ve + ff_ve
 
     # Cap total lateral velocity
     lat = math.sqrt(vn * vn + ve * ve)
@@ -320,7 +323,7 @@ def compute_guidance(tracker, dist_est, prev_cmd):
         ve *= MAX_LATERAL_VEL / lat
 
     info = {
-        'dist': dist_est, 'vd_speed': vd_speed, 't_int': t_int,
+        'dist': dist_est, 'vd_speed': speed, 't_int': t_int,
         'bn': pn, 'be': pe, 'bd': pd,
         'lat_angle': math.degrees(angle) if lat_mag > 0.001 else 0.0,
         'ff': math.sqrt(ff_vn ** 2 + ff_ve ** 2),
