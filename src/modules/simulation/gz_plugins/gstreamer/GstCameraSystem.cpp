@@ -415,12 +415,6 @@ void GstCameraSystem::gstThreadFunc()
 					memcpy(map.data, _currentFrame.data().c_str(), size);
 					gst_buffer_unmap(buffer, &map);
 
-					// Add timing information for smoother playback
-					GstClock *clock = gst_system_clock_obtain();
-					GstClockTime timestamp = gst_clock_get_time(clock);
-					gst_object_unref(clock);
-
-					GST_BUFFER_PTS(buffer) = timestamp;
 					GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale_int(1, GST_SECOND, (int)_rate);
 
 					GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(_source), buffer);
