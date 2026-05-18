@@ -1,0 +1,33 @@
+services:
+  px4:
+    build: ./Tools/setup/
+    container_name: px4-gz
+
+    user: "0:0"
+
+    stdin_open: true
+    tty: true
+
+    working_dir: /src/PX4-Autopilot
+
+    volumes:
+      - .:/src/PX4-Autopilot
+      - /tmp/.X11-unix:/tmp/.X11-unix
+
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - XAUTHORITY=${XAUTHORITY}
+
+    devices:
+      - /dev/dri:/dev/dri
+
+    network_mode: host
+
+    privileged: true
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]

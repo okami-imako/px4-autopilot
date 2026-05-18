@@ -42,7 +42,7 @@ docker run -it --rm --privileged --gpus all\
   -e DISPLAY=$DISPLAY \
   -e QT_X11_NO_MITSHM=1 \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
-  -v $(pwd):/src/PX4-Autopilot \
+  -v $(pwd):/src/PX4-Autopilot:rw \
   px4io/px4-dev-simulation-focal
 ```
 
@@ -51,6 +51,15 @@ And then run the following
 ```
 cd /src/PX4-Autopilot
 make px4_sitl gazebo-classic_iris_fpv_cam
+```
+
+## New Gazebo
+```
+xhost +local:root
+docker compose build
+docker compose up -d
+docker exec -it px4-gz bash
+make px4_sitl gz_x500_mono_cam
 ```
 
 ## Step 4 - Overcoming arming with disabled GPS

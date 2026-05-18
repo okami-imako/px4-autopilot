@@ -21,7 +21,7 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY requirements.txt /tmp/requirements.txt
 COPY ubuntu.sh /tmp/ubuntu.sh
 
-RUN bash /tmp/ubuntu.sh --no-sim-tools
+RUN bash /tmp/ubuntu.sh
 
 # Make sure git is ok with your local copy
 RUN git config --global --add safe.directory '*'
