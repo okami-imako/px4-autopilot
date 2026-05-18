@@ -121,5 +121,7 @@ px4_add_romfs_files(
 	70000_gz_atmos
 	70001_gz_atmos_dual
 
+	4250_gz_my_tailsitter
+
 	# [22000, 22999] Reserve for custom models
 )
