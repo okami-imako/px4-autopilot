@@ -1,13 +1,39 @@
 # Gazebo with PX4 sitl setup
 
-## Step 1 - Clone PX4-Autopilot
+## Gazebo
+
+```
+docker compose build
+xhost +local:root
+docker compose up -d
+docker exec -it px4-gz bash
+```
+
+inside container:
+```
+make distclean
+make px4_sitl gz_x500_mono_cam
+```
+
+to consume drone camera feed:
+```
+gst-launch-1.0 udpsrc port=5600 \
+    ! application/x-rtp,encoding-name=H264,payload=96 \
+    ! rtph264depay \
+    ! avdec_h264 \
+    ! videoconvert \
+    ! autovideosink
+```
+
+## Gazebo Classic
+### Step 1 - Clone PX4-Autopilot
 ```
 git clone https://github.com/okami-imako/PX4-Autopilot.git
 cd PX4-Autopilot
 git submodule update --init --recursive
 ```
 
-## Step 2 - Container prerequisites
+### Step 2 - Container prerequisites
 Run the following container (from PX4-Autopilot directory for mounting via pwd):
 
 ```
@@ -31,7 +57,7 @@ cd /src/PX4-Autopilot
 git config --global --add safe.directory /src/PX4-Autopilot
 ```
 
-## Step 3 - Running the sim
+### Step 3 - Running the sim
 
 To run the sim you need to start the container (if you don't already have a running instance):
 ```
@@ -53,13 +79,14 @@ cd /src/PX4-Autopilot
 make px4_sitl gazebo-classic_iris_fpv_cam
 ```
 
-## New Gazebo
+### To consume video stream
 ```
-xhost +local:root
-docker compose build
-docker compose up -d
-docker exec -it px4-gz bash
-make px4_sitl gz_x500_mono_cam
+gst-launch-1.0 udpsrc port=5600 \
+    ! application/x-rtp,encoding-name=H264,payload=96 \
+    ! rtph264depay \
+    ! avdec_h264 \
+    ! videoconvert \
+    ! autovideosink
 ```
 
 ## Step 4 - Overcoming arming with disabled GPS
