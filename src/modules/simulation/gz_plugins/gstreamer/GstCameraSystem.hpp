@@ -98,7 +98,7 @@ private:
 	int _udpPort = 5600;
 	bool _useRtmp {};
 	std::string _rtmpLocation;
-	bool _useCuda = true;
+	bool _useCuda = false;
 
 	// Topic info
 	std::string _cameraTopic;
