@@ -18,6 +18,8 @@ services:
       - DISPLAY=${DISPLAY}
       - QT_X11_NO_MITSHM=1
       - XAUTHORITY=${XAUTHORITY}
+      - GZ_VERBOSE=4
+      - GST_DEBUG=1
 
     devices:
       - /dev/dri:/dev/dri
