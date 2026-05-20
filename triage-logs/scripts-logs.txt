@@ -1,0 +1,20 @@
+❯ python detect_and_chase.py
+Waiting for connection...
+Connected
+Waiting for EKF init...
+Priming offboard...
+Starting offboard...
+Arming...
+Received ack for not-existing command: 176! Ignoring... (mavlink_command_sender.cpp:304)
+Armed
+Taking off...
+QFontDatabase: Cannot find font directory /home/okami/Projects/PX4-Autopilot/scripts/.venv/lib/python3.14/site-packages/cv2/qt/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
+QFontDatabase: Cannot find font directory /home/okami/Projects/PX4-Autopilot/scripts/.venv/lib/python3.14/site-packages/cv2/qt/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
+QFontDatabase: Cannot find font directory /home/okami/Projects/PX4-Autopilot/scripts/.venv/lib/python3.14/site-packages/cv2/qt/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
+QFontDatabase: Cannot find font directory /home/okami/Projects/PX4-Autopilot/scripts/.venv/lib/python3.14/site-packages/cv2/qt/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
+QFontDatabase: Cannot find font directory /home/okami/Projects/PX4-Autopilot/scripts/.venv/lib/python3.14/site-packages/cv2/qt/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
