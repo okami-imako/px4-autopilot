@@ -390,6 +390,11 @@ async def run():
         cv2.CAP_GSTREAMER
     )
 
+	if not cap.isOpened():
+	  print("FATAL: GStreamer pipeline failed open")
+	  return
+	print("GST pipeline open")
+
     cv2.namedWindow("Tracking", cv2.WINDOW_NORMAL)
 
     tracker = TargetTracker()
