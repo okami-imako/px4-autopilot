@@ -1,0 +1,5 @@
+FROM px4-autopilot-px4:latest
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends xvfb x11vnc && \
+    rm -rf /var/lib/apt/lists/*

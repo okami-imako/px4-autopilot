@@ -1,0 +1,38 @@
+services:
+  px4:
+    build:
+      context: ./Tools/setup/
+      dockerfile: Dockerfile.mac
+    container_name: px4-gz
+
+    user: "0:0"
+
+    stdin_open: true
+    tty: true
+
+    working_dir: /src/PX4-Autopilot
+
+    environment:
+      - DISPLAY=:99        # Xvfb virtual display (started by entrypoint)
+      - QT_X11_NO_MITSHM=1
+      - GZ_VERBOSE=4
+      - GST_DEBUG=1
+
+    volumes:
+      - .:/src/PX4-Autopilot
+
+    network_mode: bridge
+
+    privileged: true
+
+    ports:
+      - "5900:5900"        # VNC
+      - "5600:5600/udp"    # Gazebo camera feed
+      - "14540:14540/udp"  # MAVLink
+      - "14556:14556/udp"
+      - "14557:14557/udp"
+
+    command: >
+      bash -c "sleep 2 &&
+               x11vnc -display :99 -forever -passwd px4 -rfbport 5900 -bg &&
+               sleep infinity"
