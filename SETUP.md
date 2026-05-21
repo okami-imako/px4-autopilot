@@ -2,6 +2,8 @@
 
 ## Gazebo
 
+### Linux
+
 ```
 docker compose build
 xhost +local:root
@@ -15,7 +17,66 @@ make distclean
 make px4_sitl gz_x500_mono_cam
 ```
 
-to consume drone camera feed:
+### Mac (Apple Silicon)
+
+X11 forwarding doesn't support OpenGL on Mac, so the setup uses Xvfb (virtual framebuffer) inside the container with VNC to view the UI.
+
+#### Prerequisites (one time)
+
+Install a VNC client — Mac's built-in Screen Sharing works:
+```
+brew install --cask tiger-vnc
+```
+Or just use Finder → Go → Connect to Server.
+
+#### Build
+
+Build the base image first, then the Mac image on top of it:
+```
+docker compose build
+docker compose -f docker-compose.mac.yml build
+```
+
+#### Run
+
+```
+docker compose -f docker-compose.mac.yml up -d
+docker exec -it px4-gz bash
+```
+
+#### Connect to the display
+
+Open VNC from your Mac (password: `px4`):
+```
+open vnc://localhost:5900
+```
+
+You will see a black screen — this is normal. The Gazebo window will appear after the sim starts.
+
+#### Start the sim
+
+Inside the container (first run only, clears stale CMake cache):
+```
+make distclean
+make px4_sitl gz_x500_mono_cam
+```
+
+Subsequent runs:
+```
+make px4_sitl gz_x500_mono_cam
+```
+
+#### Consume drone camera feed
+```
+gst-launch-1.0 udpsrc port=5600 \
+    ! application/x-rtp,encoding-name=H264,payload=96 \
+    ! rtph264depay \
+    ! avdec_h264 \
+    ! videoconvert \
+    ! autovideosink
+```
+
+### Camera feed (Linux)
 ```
 gst-launch-1.0 udpsrc port=5600 \
     ! application/x-rtp,encoding-name=H264,payload=96 \
